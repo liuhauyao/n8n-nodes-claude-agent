@@ -1,16 +1,39 @@
-import type { FilterValue } from 'n8n-workflow';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
-import { resolveHostModule } from './resolveHostModule';
+import type { FilterValue } from 'n8n-workflow';
 
 type ExecuteFilterFn = (filter: FilterValue, options: { itemIndex: number }) => boolean;
 
+const hostRequire = createRequire(__filename);
+
 let cachedExecuteFilter: ExecuteFilterFn | undefined;
+
+function getN8nWorkflowRoot(): string {
+	const seeds = [
+		join(dirname(process.execPath), '../lib/node_modules/n8n/node_modules'),
+		join(dirname(process.execPath), '../lib/node_modules'),
+		process.cwd(),
+	];
+	for (const seed of seeds) {
+		try {
+			return dirname(hostRequire.resolve('n8n-workflow/package.json', { paths: [seed] }));
+		} catch {
+			// try next seed
+		}
+	}
+	throw new Error(
+		'Cannot resolve n8n-workflow from the n8n runtime. '
+			+ 'Claude Model Selector must run inside a self-hosted n8n process.',
+	);
+}
 
 function getExecuteFilter(): ExecuteFilterFn {
 	if (!cachedExecuteFilter) {
-		const mod = resolveHostModule<{ executeFilter: ExecuteFilterFn }>(
-			'n8n-workflow/dist/cjs/node-parameters/filter-parameter',
-		);
+		const wfRoot = getN8nWorkflowRoot();
+		const mod = hostRequire(join(wfRoot, 'dist/cjs/node-parameters/filter-parameter.js')) as {
+			executeFilter: ExecuteFilterFn;
+		};
 		cachedExecuteFilter = mod.executeFilter;
 	}
 	return cachedExecuteFilter;
