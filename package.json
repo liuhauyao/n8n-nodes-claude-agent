@@ -1,0 +1,68 @@
+{
+  "name": "n8n-nodes-claude-agent",
+  "version": "1.0.0",
+  "description": "n8n community nodes — Claude Agent SDK with Model Selector, Provider credentials, streaming, MCP and skills.",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "claude",
+    "claude-code",
+    "anthropic",
+    "agent",
+    "mcp",
+    "model-selector"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "liuhuayao",
+    "email": "liuhuayao@126.com"
+  },
+  "homepage": "https://github.com/liuhauyao/n8n-nodes-claude-agent#readme",
+  "bugs": {
+    "url": "https://github.com/liuhauyao/n8n-nodes-claude-agent/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liuhauyao/n8n-nodes-claude-agent.git"
+  },
+  "main": "dist/nodes/ClaudeAgent/ClaudeAgent.node.js",
+  "scripts": {
+    "build": "tsc && npm run copy-assets",
+    "prepack": "npm run build",
+    "copy-assets": "copyfiles \"nodes/**/*.svg\" \"credentials/*.svg\" dist/",
+    "verify": "npm run build && eslint dist && node scripts/lint-package-json.mjs",
+    "lint": "eslint dist && node scripts/lint-package-json.mjs",
+    "dev": "tsc --watch",
+    "poc": "node scripts/poc-local.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.16"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/ClaudeProvider.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/ClaudeModelSelector/ClaudeModelSelector.node.js",
+      "dist/nodes/ClaudeAgent/ClaudeAgent.node.js"
+    ]
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.150",
+    "@n8n/eslint-plugin-community-nodes": "^0.15.0",
+    "@types/node": "^22.0.0",
+    "copyfiles": "^2.4.1",
+    "eslint": "^9.29.0",
+    "n8n-workflow": ">=1.82.0",
+    "typescript": "~5.7.0"
+  }
+}

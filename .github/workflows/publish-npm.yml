@@ -1,0 +1,47 @@
+name: Publish to npm
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and lint
+        run: npm run verify
+
+      - name: Configure npm registry auth
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NPM_TOKEN" || (echo "::error::NPM_TOKEN secret is empty" && exit 1)
+          TOKEN="$(printf '%s' "$NPM_TOKEN" | tr -d '\n\r')"
+          printf '%s\n' "//registry.npmjs.org/:_authToken=${TOKEN}" > ~/.npmrc
+          printf '%s\n' "always-auth=true" >> ~/.npmrc
+          npm whoami
+
+      - name: Publish if version not on npm
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "n8n-nodes-claude-agent@${VERSION}" version 2>/dev/null; then
+            echo "Version ${VERSION} already on npm, skip publish."
+            exit 0
+          fi
+          npm publish --access public
