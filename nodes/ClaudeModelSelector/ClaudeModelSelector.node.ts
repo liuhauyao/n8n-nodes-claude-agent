@@ -18,6 +18,7 @@ import {
 	evaluateProfileIndex,
 } from '../shared/lib/evaluateRules';
 import { buildModelConfigFromCredentials } from '../shared/lib/resolveModelConfig';
+import { claudeProviderCredentialTest } from '../shared/lib/claudeProviderCredentialTest';
 import { CLAUDE_MODEL_CONFIG_FIELD } from '../shared/lib/types';
 
 const MAX_PROFILES = 10;
@@ -51,6 +52,12 @@ function buildProfileProperties(): INodeProperties[] {
 }
 
 export class ClaudeModelSelector implements INodeType {
+	methods = {
+		credentialTest: {
+			claudeProviderCredentialTest,
+		},
+	};
+
 	description: INodeTypeDescription = {
 		displayName: 'Claude Model Selector',
 		name: 'claudeModelSelector',
@@ -65,6 +72,12 @@ export class ClaudeModelSelector implements INodeType {
 		},
 		inputs: [NodeConnectionTypes.Main],
 		outputs: [NodeConnectionTypes.Main],
+		credentials: [
+			{
+				name: 'claudeProvider',
+				testedBy: 'claudeProviderCredentialTest',
+			},
+		],
 		properties: [
 			{
 				displayName: 'Number of Profiles',

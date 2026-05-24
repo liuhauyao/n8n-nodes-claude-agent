@@ -223,6 +223,9 @@ export class ClaudeProvider implements ICredentialType {
 
 	documentationUrl = 'https://code.claude.com/docs/en/agent-sdk/overview';
 
+	/** Nodes that register credentialTest.claudeProviderCredentialTest */
+	supportedNodes = ['claudeAgent', 'claudeModelSelector'];
+
 	properties: INodeProperties[] = providerFields();
 
 	methods = {
