@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { resolveHostModule } from './resolveHostModule';
 import {
 	buildClaudeProviderTypeInClause,
-	CLAUDE_PROVIDER_BASE_TYPE,
+	buildClaudeProviderTypeInClausePostgres,
 	isClaudeProviderCredentialType,
 } from './claudeProviderCredentialTypes';
 
@@ -31,6 +31,22 @@ type Sqlite3Module = {
 	) => SqliteDatabase;
 	OPEN_READONLY: number;
 };
+
+type PgPool = {
+	query: (
+		sql: string,
+		params?: unknown[],
+	) => Promise<{ rows: ClaudeProviderCredentialListItem[] }>;
+	end: () => Promise<void>;
+};
+
+type PgModule = {
+	Pool: new (config: Record<string, unknown>) => PgPool;
+};
+
+function usesPostgres(): boolean {
+	return process.env.DB_TYPE === 'postgresdb';
+}
 
 function getSqliteDatabasePath(): string {
 	if (process.env.DB_SQLITE_DATABASE) {
@@ -78,18 +94,63 @@ function querySqlite(
 	});
 }
 
+async function queryPostgres(
+	sql: string,
+	params: unknown[] = [],
+): Promise<ClaudeProviderCredentialListItem[]> {
+	const pg = resolveHostModule<PgModule>('pg');
+	const pool = new pg.Pool({
+		host: process.env.DB_POSTGRESDB_HOST ?? 'localhost',
+		port: Number(process.env.DB_POSTGRESDB_PORT ?? 5432),
+		database: process.env.DB_POSTGRESDB_DATABASE,
+		user: process.env.DB_POSTGRESDB_USER,
+		password: process.env.DB_POSTGRESDB_PASSWORD,
+	});
+	try {
+		const result = await pool.query(sql, params);
+		return result.rows ?? [];
+	} finally {
+		await pool.end();
+	}
+}
+
+async function queryCredentials(
+	sql: string,
+	params: unknown[] = [],
+): Promise<ClaudeProviderCredentialListItem[]> {
+	if (usesPostgres()) {
+		return queryPostgres(sql, params);
+	}
+	return querySqlite(sql, params);
+}
+
+function filterClaudeProviderRows(
+	rows: ClaudeProviderCredentialListItem[],
+): ClaudeProviderCredentialListItem[] {
+	return rows.filter(
+		(row) => row.id && row.name && isClaudeProviderCredentialType(row.type),
+	);
+}
+
 export async function listClaudeProviderCredentialsFromDatabase(): Promise<
 	ClaudeProviderCredentialListItem[]
 > {
 	const tableName = getCredentialsTableName();
+	if (usesPostgres()) {
+		const { clause, params } = buildClaudeProviderTypeInClausePostgres();
+		const rows = await queryCredentials(
+			`SELECT id, name, type FROM ${tableName} WHERE ${clause} ORDER BY LOWER(name) ASC`,
+			params,
+		);
+		return filterClaudeProviderRows(rows);
+	}
+
 	const { clause, params } = buildClaudeProviderTypeInClause();
-	const rows = await querySqlite(
+	const rows = await queryCredentials(
 		`SELECT id, name, type FROM "${tableName}" WHERE ${clause} ORDER BY name COLLATE NOCASE ASC`,
 		params,
 	);
-	return rows.filter(
-		(row) => row.id && row.name && isClaudeProviderCredentialType(row.type),
-	);
+	return filterClaudeProviderRows(rows);
 }
 
 export async function findClaudeProviderCredentialById(
@@ -98,12 +159,20 @@ export async function findClaudeProviderCredentialById(
 	const trimmedId = credentialId.trim();
 	if (!trimmedId) return null;
 	const tableName = getCredentialsTableName();
+
+	if (usesPostgres()) {
+		const { clause, params } = buildClaudeProviderTypeInClausePostgres(2);
+		const rows = await queryCredentials(
+			`SELECT id, name, type FROM ${tableName} WHERE id = $1 AND ${clause} LIMIT 1`,
+			[trimmedId, ...params],
+		);
+		return filterClaudeProviderRows(rows)[0] ?? null;
+	}
+
 	const { clause, params } = buildClaudeProviderTypeInClause();
-	const rows = await querySqlite(
+	const rows = await queryCredentials(
 		`SELECT id, name, type FROM "${tableName}" WHERE id = ? AND ${clause} LIMIT 1`,
 		[trimmedId, ...params],
 	);
-	const row = rows[0];
-	if (!row?.id || !row.name || !isClaudeProviderCredentialType(row.type)) return null;
-	return row;
+	return filterClaudeProviderRows(rows)[0] ?? null;
 }

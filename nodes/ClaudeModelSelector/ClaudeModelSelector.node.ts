@@ -76,9 +76,8 @@ function buildProfileCollectionProperties(): INodeProperties[] {
 						cachedResultName: '',
 					},
 					required: false,
-					noDataExpression: true,
 					description:
-						'Optional. Loaded from GET {baseUrl}/v1/models for the credential above; leave empty to use upstream inferenceModel or credential default.',
+						'Optional. From list, ID, or expression (ID mode). Leave empty to use upstream inferenceModel / modelName or credential default.',
 					typeOptions: {
 						loadOptionsDependsOn: ['&credential'],
 					},
