@@ -1,11 +1,27 @@
 import type { FilterValue } from 'n8n-workflow';
-import { executeFilter } from 'n8n-workflow/dist/cjs/node-parameters/filter-parameter';
+
+import { resolveHostModule } from './resolveHostModule';
+
+type ExecuteFilterFn = (filter: FilterValue, options: { itemIndex: number }) => boolean;
+
+let cachedExecuteFilter: ExecuteFilterFn | undefined;
+
+function getExecuteFilter(): ExecuteFilterFn {
+	if (!cachedExecuteFilter) {
+		const mod = resolveHostModule<{ executeFilter: ExecuteFilterFn }>(
+			'n8n-workflow/dist/cjs/node-parameters/filter-parameter',
+		);
+		cachedExecuteFilter = mod.executeFilter;
+	}
+	return cachedExecuteFilter;
+}
 
 export function evaluateProfileIndex(
 	rules: Array<{ profileIndex: number; conditions: FilterValue }>,
 	defaultProfileIndex: number,
 	itemIndex: number,
 ): number {
+	const executeFilter = getExecuteFilter();
 	for (const rule of rules) {
 		if (!rule?.conditions) continue;
 		try {
