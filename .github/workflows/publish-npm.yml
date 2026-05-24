@@ -40,7 +40,7 @@ jobs:
       - name: Publish if version not on npm
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          if npm view "@liuhuayao/n8n-nodes-claude-agent@${VERSION}" version 2>/dev/null; then
+          if npm view "n8n-nodes-claude-sdk-agent@${VERSION}" version 2>/dev/null; then
             echo "Version ${VERSION} already on npm, skip publish."
             exit 0
           fi

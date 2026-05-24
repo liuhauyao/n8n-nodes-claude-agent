@@ -84,7 +84,7 @@ export function mergeSdkEnvWithProcess(
 	return {
 		...process.env,
 		...sdkEnv,
-		CLAUDE_AGENT_SDK_CLIENT_APP: sdkEnv.CLAUDE_AGENT_SDK_CLIENT_APP ?? 'n8n-nodes-claude-agent',
+		CLAUDE_AGENT_SDK_CLIENT_APP: sdkEnv.CLAUDE_AGENT_SDK_CLIENT_APP ?? 'n8n-nodes-claude-sdk-agent',
 	};
 }
 

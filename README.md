@@ -1,4 +1,4 @@
-# n8n-nodes-claude-agent
+# n8n-nodes-claude-sdk-agent
 
 n8n community nodes for **Claude Code** via the official [`@anthropic-ai/claude-agent-sdk`](https://code.claude.com/docs/en/agent-sdk/overview).
 
@@ -27,7 +27,7 @@ Includes:
 
 ### n8n UI
 
-Settings → Community Nodes → Install → `@liuhuayao/n8n-nodes-claude-agent`
+Settings → Community Nodes → Install → `n8n-nodes-claude-sdk-agent`
 
 ### Host dependencies (`~/.n8n/nodes/package.json`)
 
@@ -36,7 +36,7 @@ Community nodes must not bundle the SDK. Install alongside the node package:
 ```json
 {
   "dependencies": {
-    "@liuhuayao/n8n-nodes-claude-agent": "1.0.30",
+    "n8n-nodes-claude-sdk-agent": "1.0.0",
     "@anthropic-ai/claude-agent-sdk": "0.3.150"
   },
   "optionalDependencies": {
