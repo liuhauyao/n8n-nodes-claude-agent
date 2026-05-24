@@ -89,7 +89,7 @@ Use **Custom Model ID** when the gateway does not expose `/v1/models`.
 | Parameter | Description |
 |-----------|-------------|
 | Model Config Source | `fromSelector` / `fromCredential` / `fromInput` |
-| Permission Preset | `customer_service` (default), `world_assistant`, `read_only`, `full_agent` |
+| Permission Preset | `customer_service` (default), `read_only`, `full_agent` (`world_assistant` legacy alias → `full_agent`) |
 | Skills / MCP | Same patterns as n8n-nodes-cursor-agent |
 | Session ID | Maps to Claude SDK `session_id` via Redis; locks model on first turn |
 

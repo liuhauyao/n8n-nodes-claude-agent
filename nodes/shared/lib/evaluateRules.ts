@@ -58,18 +58,40 @@ export function evaluateProfileIndex(
 	return defaultProfileIndex;
 }
 
+/** Legacy flat parameter: profile1Credential */
 export function buildProfileCredentialFieldName(index: number): string {
 	return `profile${index}Credential`;
 }
 
+/** Legacy flat parameter: profile1ModelOverride */
 export function buildProfileModelOverrideFieldName(index: number): string {
 	return `profile${index}ModelOverride`;
 }
 
-export function buildProfileDisplayOptions(index: number, numberOfProfiles: number) {
+/** Collection parameter: profile1 */
+export function buildProfileCollectionFieldName(index: number): string {
+	return `profile${index}`;
+}
+
+export function buildProfileCollectionCredentialPath(index: number): string {
+	return `${buildProfileCollectionFieldName(index)}.credential`;
+}
+
+export function buildProfileCollectionModelPath(index: number): string {
+	return `${buildProfileCollectionFieldName(index)}.modelOverride`;
+}
+
+/** Relative path for loadOptions on profile1.modelOverride → profile1.credential */
+export const PROFILE_CREDENTIAL_LOAD_OPTIONS_PATH = '&credential';
+
+export function buildProfileDisplayOptions(index: number, maxProfiles: number) {
 	return {
 		show: {
-			numberOfProfiles: Array.from({ length: numberOfProfiles - index + 1 }, (_, i) => i + index),
+			numberOfProfiles: Array.from({ length: maxProfiles - index + 1 }, (_, i) => i + index),
 		},
 	};
+}
+
+export function buildProfileCredentialDisplayOptions(index: number, maxProfiles: number) {
+	return buildProfileDisplayOptions(index, maxProfiles);
 }

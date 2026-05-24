@@ -7,10 +7,21 @@ import type {
 } from 'n8n-workflow';
 
 import { readProviderCredentials } from './buildSdkEnv';
-import { listModels } from './modelCatalog';
+import { listModels, verifyAnthropicGatewayConnection } from './modelCatalog';
 import type { ProviderType } from './types';
 
 const DIRECT_AND_GATEWAY: ProviderType[] = ['anthropic_direct', 'anthropic_gateway'];
+
+function validateApiKeyShape(apiKey: string): string | undefined {
+	const trimmed = apiKey.trim();
+	if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+		return 'API Key field contains a URL. Paste your provider API key (e.g. sk-...), not the Base URL.';
+	}
+	if (trimmed.length > 0 && trimmed.length < 20) {
+		return 'API Key looks too short. Paste the full key from your provider console.';
+	}
+	return undefined;
+}
 
 export async function claudeProviderCredentialTest(
 	this: ICredentialTestFunctions,
@@ -24,23 +35,52 @@ export async function claudeProviderCredentialTest(
 				message: 'API Key or Auth Token is required for Anthropic direct/gateway providers',
 			};
 		}
+		if (parsed.apiKey?.trim()) {
+			const shapeError = validateApiKeyShape(parsed.apiKey);
+			if (shapeError) {
+				return { status: 'Error', message: shapeError };
+			}
+		}
 		if (parsed.providerType === 'anthropic_gateway' && !parsed.baseUrl?.trim()) {
 			return {
 				status: 'Error',
 				message: 'Base URL is required for Anthropic gateway provider',
 			};
 		}
+
 		try {
 			const models = await listModels(parsed.providerType, parsed);
 			return {
 				status: 'OK',
-				message: `Connected. ${models.length} model(s) available.`,
+				message: `Connected. ${models.length} model(s) from GET /v1/models.`,
 			};
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+		} catch (listError) {
+			if (parsed.providerType === 'anthropic_gateway') {
+				try {
+					await verifyAnthropicGatewayConnection(parsed);
+					const hint =
+						parsed.customModel?.trim() || parsed.defaultModel?.trim()
+							? ''
+							: ' Gateway has no /v1/models — set Custom Model ID for the model picker.';
+					return {
+						status: 'OK',
+						message: `Connected via POST /v1/messages.${hint}`,
+					};
+				} catch (verifyError) {
+					const listMessage = listError instanceof Error ? listError.message : String(listError);
+					const verifyMessage =
+						verifyError instanceof Error ? verifyError.message : String(verifyError);
+					return {
+						status: 'Error',
+						message:
+							`${verifyMessage} (Models API: ${listMessage})`,
+					};
+				}
+			}
+			const message = listError instanceof Error ? listError.message : String(listError);
 			return {
 				status: 'Error',
-				message: `Connection failed: ${message}`,
+				message: `Could not load models: ${message}`,
 			};
 		}
 	}

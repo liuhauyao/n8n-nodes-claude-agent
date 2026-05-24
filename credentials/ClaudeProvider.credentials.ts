@@ -61,7 +61,9 @@ function providerFields(): INodeProperties[] {
 			name: 'baseUrl',
 			type: 'string',
 			default: '',
-			placeholder: 'https://your-litellm.example.com',
+			placeholder: 'https://your-litellm.example.com or https://api.deepseek.com/anthropic',
+			description:
+				'ANTHROPIC_BASE_URL for Claude Code SDK. Model list uses GET {baseUrl}/v1/models per Anthropic LLM gateway docs.',
 			displayOptions: {
 				show: {
 					providerType: ['anthropic_gateway'],
@@ -196,23 +198,26 @@ function providerFields(): INodeProperties[] {
 			name: 'customModel',
 			type: 'string',
 			default: '',
-			description: 'Optional override when the gateway does not expose /v1/models',
+			description: 'Optional override when the provider does not expose a models list API (e.g. Bedrock/Vertex)',
 		},
 	];
 }
 
 async function getModels(this: ILoadOptionsFunctions) {
-	const raw = await this.getCredentials('claudeProvider');
-	const credentials = readProviderCredentials(raw as IDataObject);
 	try {
+		const raw = await this.getCredentials('claudeProvider');
+		const credentials = readProviderCredentials(raw as IDataObject);
 		const models = await listModels(credentials.providerType, credentials);
 		return modelsToOptions(models);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		return modelsToOptions(await listModels(credentials.providerType, credentials)).map((opt) => ({
-			...opt,
-			description: `Fallback: dynamic model list failed (${message})`,
-		}));
+		return [
+			{
+				name: `Could not load models: ${message}`,
+				value: '__claude_agent__:credential_models_error',
+				description: message,
+			},
+		];
 	}
 }
 

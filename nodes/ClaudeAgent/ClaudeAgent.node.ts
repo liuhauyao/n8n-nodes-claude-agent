@@ -35,27 +35,45 @@ const SETTING_SOURCE_OPTIONS: INodePropertyOptions[] = [
 
 const PERMISSION_PRESETS: Record<
 	string,
-	{ allowedTools?: string[]; disallowedTools?: string[]; permissionMode?: string; tools?: { type: 'preset'; preset: 'claude_code' } }
+	{
+		allowedTools?: string[];
+		disallowedTools?: string[];
+		permissionMode?: string;
+		allowDangerouslySkipPermissions?: boolean;
+		tools?: { type: 'preset'; preset: 'claude_code' };
+	}
 > = {
 	customer_service: {
 		allowedTools: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
 		disallowedTools: ['Bash', 'Write', 'Edit'],
-		permissionMode: 'default',
-	},
-	world_assistant: {
-		tools: { type: 'preset', preset: 'claude_code' },
-		permissionMode: 'default',
+		permissionMode: 'bypassPermissions',
+		allowDangerouslySkipPermissions: true,
 	},
 	read_only: {
 		allowedTools: ['Read', 'Grep', 'Glob'],
 		disallowedTools: ['Bash', 'Write', 'Edit'],
-		permissionMode: 'default',
+		permissionMode: 'bypassPermissions',
+		allowDangerouslySkipPermissions: true,
 	},
 	full_agent: {
 		tools: { type: 'preset', preset: 'claude_code' },
-		permissionMode: 'acceptEdits',
+		permissionMode: 'bypassPermissions',
+		allowDangerouslySkipPermissions: true,
 	},
 };
+
+/** Legacy alias — removed from UI in 1.0.29; behaves as full_agent. */
+const LEGACY_PERMISSION_PRESET_ALIASES: Record<string, keyof typeof PERMISSION_PRESETS> = {
+	world_assistant: 'full_agent',
+};
+
+function resolvePermissionPreset(raw: string): keyof typeof PERMISSION_PRESETS {
+	const key = LEGACY_PERMISSION_PRESET_ALIASES[raw] ?? raw;
+	if (key in PERMISSION_PRESETS) {
+		return key as keyof typeof PERMISSION_PRESETS;
+	}
+	return 'customer_service';
+}
 
 function readRedisCredentials(raw: IDataObject): RedisCredentials {
 	return {
@@ -80,18 +98,19 @@ function readSkills(raw: string | undefined): string[] | 'all' | undefined {
 	return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
-function applyLockedModelConfig(
+/** Resume Claude SDK session only when provider/profile/model unchanged (same chat sessionId). */
+function canResumeClaudeSession(
 	current: ClaudeModelConfig,
 	stored: StoredSessionRecord | undefined,
-): ClaudeModelConfig {
-	if (!stored?.modelConfig?.model) return current;
-	return {
-		...current,
-		model: stored.modelConfig.model,
-		providerType: stored.modelConfig.providerType,
-		profileName: stored.modelConfig.profileName,
-		profileIndex: stored.modelConfig.profileIndex,
-	};
+): boolean {
+	if (!stored?.claudeSessionId) return false;
+	if (!stored.modelConfig?.model) return true;
+	const storedConfig = stored.modelConfig;
+	return (
+		storedConfig.model === current.model
+		&& storedConfig.providerType === current.providerType
+		&& storedConfig.profileIndex === current.profileIndex
+	);
 }
 
 export class ClaudeAgent implements INodeType {
@@ -218,10 +237,9 @@ export class ClaudeAgent implements INodeType {
 				type: 'options',
 				default: 'customer_service',
 				options: [
-					{ name: 'Customer Service (read-only + MCP)', value: 'customer_service' },
-					{ name: 'World Assistant', value: 'world_assistant' },
-					{ name: 'Read Only', value: 'read_only' },
-					{ name: 'Full Agent', value: 'full_agent' },
+					{ name: 'Restricted — Read/Web + MCP', value: 'customer_service' },
+					{ name: 'Strict Read Only', value: 'read_only' },
+					{ name: 'Full Claude Code Tools', value: 'full_agent' },
 				],
 			},
 			{
@@ -428,7 +446,7 @@ export class ClaudeAgent implements INodeType {
 				});
 
 				const storedSession = sessionId ? await getStoredSession(redisCredentials, sessionId) : undefined;
-				modelConfig = applyLockedModelConfig(modelConfig, storedSession);
+				const resumeSession = canResumeClaudeSession(modelConfig, storedSession);
 
 				const { cwd, additionalDirectories } = resolveWorkingDir({
 					skillsRoot,
@@ -438,9 +456,9 @@ export class ClaudeAgent implements INodeType {
 
 				const mcpServersParsed = parseMcpServers(mcpServersJson, mcpServersForm);
 				const mcpServers = toClaudeSdkMcpServers(mcpServersParsed);
-				const preset = PERMISSION_PRESETS[permissionPreset] ?? PERMISSION_PRESETS.customer_service;
+				const preset = PERMISSION_PRESETS[resolvePermissionPreset(permissionPreset)];
 
-				const prompt = storedSession?.claudeSessionId
+				const prompt = resumeSession
 					? chatInput.trim()
 					: [systemMessage?.trim(), chatInput.trim()].filter(Boolean).join('\n\n---\n\n');
 
@@ -465,7 +483,9 @@ export class ClaudeAgent implements INodeType {
 					includePartialMessages: true,
 					model: modelConfig.model,
 					env: mergeSdkEnvWithProcess(modelConfig.sdkEnv),
-					...(storedSession?.claudeSessionId ? { resume: storedSession.claudeSessionId } : {}),
+					...(resumeSession && storedSession?.claudeSessionId
+						? { resume: storedSession.claudeSessionId }
+						: {}),
 					...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
 					...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 					...(skills ? { skills } : {}),
@@ -473,6 +493,9 @@ export class ClaudeAgent implements INodeType {
 					...(preset.allowedTools ? { allowedTools: preset.allowedTools } : {}),
 					...(preset.disallowedTools ? { disallowedTools: preset.disallowedTools } : {}),
 					...(preset.permissionMode ? { permissionMode: preset.permissionMode } : {}),
+					...(preset.allowDangerouslySkipPermissions
+						? { allowDangerouslySkipPermissions: true }
+						: {}),
 					...(preset.tools ? { tools: preset.tools } : {}),
 				};
 
@@ -481,7 +504,7 @@ export class ClaudeAgent implements INodeType {
 					queryOptions.systemPrompt = append
 						? { type: 'preset', preset: 'claude_code', append }
 						: { type: 'preset', preset: 'claude_code' };
-				} else if (systemMessage?.trim() && !storedSession?.claudeSessionId) {
+				} else if (systemMessage?.trim() && !resumeSession) {
 					queryOptions.systemPrompt = systemMessage.trim();
 				}
 
@@ -503,7 +526,8 @@ export class ClaudeAgent implements INodeType {
 					throw new NodeOperationError(this.getNode(), lastError, { itemIndex });
 				}
 
-				const claudeSessionId = assembler.getSessionId() ?? storedSession?.claudeSessionId;
+				const claudeSessionId = assembler.getSessionId()
+					?? (resumeSession ? storedSession?.claudeSessionId : undefined);
 				if (sessionId && claudeSessionId) {
 					await setStoredSession(
 						redisCredentials,

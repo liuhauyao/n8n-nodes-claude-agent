@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-claude-agent",
-  "version": "1.0.3",
+  "version": "1.0.29",
   "description": "n8n community nodes — Claude Agent SDK with Model Selector, Provider credentials, streaming, MCP and skills.",
   "keywords": [
     "n8n-community-node-package",
@@ -46,7 +46,17 @@
   "n8n": {
     "n8nNodesApiVersion": 1,
     "credentials": [
-      "dist/credentials/ClaudeProvider.credentials.js"
+      "dist/credentials/ClaudeProvider.credentials.js",
+      "dist/credentials/ClaudeProviderProfile1.credentials.js",
+      "dist/credentials/ClaudeProviderProfile2.credentials.js",
+      "dist/credentials/ClaudeProviderProfile3.credentials.js",
+      "dist/credentials/ClaudeProviderProfile4.credentials.js",
+      "dist/credentials/ClaudeProviderProfile5.credentials.js",
+      "dist/credentials/ClaudeProviderProfile6.credentials.js",
+      "dist/credentials/ClaudeProviderProfile7.credentials.js",
+      "dist/credentials/ClaudeProviderProfile8.credentials.js",
+      "dist/credentials/ClaudeProviderProfile9.credentials.js",
+      "dist/credentials/ClaudeProviderProfile10.credentials.js"
     ],
     "nodes": [
       "dist/nodes/ClaudeModelSelector/ClaudeModelSelector.node.js",

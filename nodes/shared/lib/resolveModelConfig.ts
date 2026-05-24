@@ -3,9 +3,12 @@ import type {
 	IDataObject,
 	IExecuteFunctions,
 	ILoadOptionsFunctions,
+	IWorkflowExecuteAdditionalData,
 } from 'n8n-workflow';
 
 import { buildSdkEnv, readProviderCredentials } from './buildSdkEnv';
+import { CLAUDE_PROVIDER_BASE_TYPE } from './claudeProviderCredentialTypes';
+import { findClaudeProviderCredentialById } from './listClaudeProviderCredentials';
 import type { ClaudeModelConfig } from './types';
 import { CLAUDE_MODEL_CONFIG_FIELD } from './types';
 
@@ -19,27 +22,129 @@ type CredentialsSelectValue =
 			value?: string;
 	  };
 
+function parseCredentialId(selection: CredentialsSelectValue | undefined): string | undefined {
+	if (typeof selection === 'string') {
+		const trimmed = selection.trim();
+		return trimmed || undefined;
+	}
+	if (selection && typeof selection === 'object') {
+		const id = selection.id ?? selection.value;
+		return typeof id === 'string' && id.trim() ? id.trim() : undefined;
+	}
+	return undefined;
+}
+
+function getAdditionalData(ctx: CredentialContext): IWorkflowExecuteAdditionalData {
+	const candidate = ctx as CredentialContext & { additionalData?: IWorkflowExecuteAdditionalData };
+	if (candidate.additionalData?.credentialsHelper) {
+		return candidate.additionalData;
+	}
+	throw new Error('Unable to access n8n credential services in this context.');
+}
+
+function hasCredentialAuth(decrypted: ICredentialDataDecryptedObject): boolean {
+	const apiKey = decrypted.apiKey;
+	const authToken = decrypted.authToken;
+	const apiKeyText = typeof apiKey === 'string' ? apiKey.trim() : '';
+	const authTokenText = typeof authToken === 'string' ? authToken.trim() : '';
+	return Boolean(apiKeyText || authTokenText);
+}
+
+function readCredentialSelection(
+	ctx: CredentialContext,
+	credentialFieldName: string,
+	itemIndex: number,
+): CredentialsSelectValue | undefined {
+	const loadOptionsCtx = ctx as ILoadOptionsFunctions;
+	if (typeof loadOptionsCtx.getCurrentNodeParameter === 'function') {
+		const current = loadOptionsCtx.getCurrentNodeParameter(credentialFieldName);
+		if (current !== undefined && current !== null && current !== '') {
+			return current as CredentialsSelectValue;
+		}
+	}
+
+	if (credentialFieldName.includes('.')) {
+		try {
+			const [collectionName, nestedName] = credentialFieldName.split('.', 2);
+			const collection = ctx.getNodeParameter(collectionName, itemIndex, {}) as Record<string, unknown>;
+			const nested = collection[nestedName];
+			if (nested !== undefined && nested !== null && nested !== '') {
+				return nested as CredentialsSelectValue;
+			}
+		} catch {
+			// fall through
+		}
+	}
+
+	try {
+		return ctx.getNodeParameter(credentialFieldName, itemIndex, '') as CredentialsSelectValue;
+	} catch {
+		return undefined;
+	}
+}
+
+export function readSelectedCredentialId(
+	ctx: CredentialContext,
+	credentialFieldName: string,
+	itemIndex = 0,
+): string | undefined {
+	return parseCredentialId(readCredentialSelection(ctx, credentialFieldName, itemIndex));
+}
+
+async function decryptClaudeProviderCredential(
+	ctx: CredentialContext,
+	credentialId: string,
+): Promise<ICredentialDataDecryptedObject> {
+	const credentialMeta = await findClaudeProviderCredentialById(credentialId);
+	if (!credentialMeta) {
+		throw new Error(`Claude Provider credential "${credentialId}" was not found.`);
+	}
+
+	const additionalData = getAdditionalData(ctx);
+	const decrypted = await additionalData.credentialsHelper.getDecrypted(
+		additionalData,
+		{ id: credentialMeta.id, name: credentialMeta.name },
+		credentialMeta.type || CLAUDE_PROVIDER_BASE_TYPE,
+		'internal',
+	);
+
+	if (!hasCredentialAuth(decrypted)) {
+		throw new Error(
+			`Credential "${credentialMeta.name}" has no API Key. Open the credential, save a valid key, then re-select Profile Credential.`,
+		);
+	}
+
+	return decrypted;
+}
+
+export async function loadClaudeProviderCredentialsById(
+	ctx: CredentialContext,
+	credentialId: string,
+): Promise<ICredentialDataDecryptedObject> {
+	return await decryptClaudeProviderCredential(ctx, credentialId);
+}
+
 export async function loadClaudeProviderCredentials(
 	ctx: CredentialContext,
 	credentialFieldName?: string,
 	itemIndex = 0,
 ): Promise<ICredentialDataDecryptedObject> {
 	if (credentialFieldName) {
-		const selection = ctx.getNodeParameter(credentialFieldName, itemIndex, '') as CredentialsSelectValue;
-		const credentialId =
-			typeof selection === 'object' && selection !== null
-				? selection.id ?? selection.value
-				: undefined;
+		const credentialId = readSelectedCredentialId(ctx, credentialFieldName, itemIndex);
 		if (credentialId) {
-			const helpers = (ctx as unknown as { helpers?: { httpRequest?: unknown; request?: unknown } }).helpers;
-			const getDecrypted = (helpers as { getDecryptedCredentials?: (id: string, type: string) => Promise<ICredentialDataDecryptedObject> })
-				?.getDecryptedCredentials;
-			if (typeof getDecrypted === 'function') {
-				return getDecrypted.call(helpers, credentialId, 'claudeProvider');
-			}
+			return await decryptClaudeProviderCredential(ctx, credentialId);
 		}
+		throw new Error(
+			`Claude Provider credential is not configured for "${credentialFieldName}". Select a credential first.`,
+		);
 	}
-	return ctx.getCredentials('claudeProvider', itemIndex);
+	try {
+		return await ctx.getCredentials('claudeProvider', itemIndex);
+	} catch {
+		throw new Error(
+			'Claude Provider credential is not configured. Select a credential on Profile Credential.',
+		);
+	}
 }
 
 export async function buildModelConfigFromCredentials(

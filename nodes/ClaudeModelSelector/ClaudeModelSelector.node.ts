@@ -12,49 +12,109 @@ import {
 
 import { buildSdkEnv, readProviderCredentials } from '../shared/lib/buildSdkEnv';
 import {
-	buildProfileCredentialFieldName,
+	buildProfileCollectionFieldName,
 	buildProfileDisplayOptions,
-	buildProfileModelOverrideFieldName,
 	evaluateProfileIndex,
 } from '../shared/lib/evaluateRules';
-import { buildModelConfigFromCredentials } from '../shared/lib/resolveModelConfig';
-import { claudeProviderCredentialTest } from '../shared/lib/claudeProviderCredentialTest';
+import { getClaudeProviderCredentials } from '../shared/lib/loadClaudeProviderCredentialOptions';
+import { buildProfileModelListSearchMethods, buildProfileModelLoadOptionsMethods } from '../shared/lib/loadProfileModelOptions';
+import {
+	asCredentialDataObject,
+	loadProfileProviderCredentials,
+} from '../shared/lib/loadProfileCredentials';
+import { MAX_PROFILE_CREDENTIAL_SLOTS } from '../shared/lib/profileCredentialSlots';
+import { readProfileModelOverride } from '../shared/lib/readProfileModelOverride';
 import { CLAUDE_MODEL_CONFIG_FIELD } from '../shared/lib/types';
 
-const MAX_PROFILES = 10;
+const MAX_PROFILES = MAX_PROFILE_CREDENTIAL_SLOTS;
 
-function buildProfileProperties(): INodeProperties[] {
+/**
+ * Per-profile collection keeps credential + model together in the UI (n8n renders collections inline).
+ * Model uses resourceLocator + loadOptionsDependsOn on credential — n8n reloads the list when
+ * credential changes (same pattern as Anthropic Chat Model + credentials, but credential is in-collection).
+ * Native description.credentials slots are NOT used — they always render at the top of the panel,
+ * separated from parameters (see Notion node: inline type "credentials" is for repositioning only).
+ */
+function buildProfileCollectionProperties(): INodeProperties[] {
 	const properties: INodeProperties[] = [];
 	for (let index = 1; index <= MAX_PROFILES; index++) {
-		properties.push(
-			{
-				displayName: `Profile ${index} Credential`,
-				name: buildProfileCredentialFieldName(index),
-				type: 'credentialsSelect',
-				default: '',
-				required: true,
-				displayOptions: buildProfileDisplayOptions(index, MAX_PROFILES),
-				typeOptions: {
-					credentialTypes: ['claudeProvider'],
+		const collectionName = buildProfileCollectionFieldName(index);
+		properties.push({
+			displayName: `Profile ${index}`,
+			name: collectionName,
+			type: 'collection',
+			placeholder: 'Configure Profile',
+			default: {
+				credential: '',
+				modelOverride: {
+					mode: 'list',
+					value: '',
+					cachedResultName: '',
 				},
 			},
-			{
-				displayName: `Profile ${index} Model Override`,
-				name: buildProfileModelOverrideFieldName(index),
-				type: 'string',
-				default: '',
-				displayOptions: buildProfileDisplayOptions(index, MAX_PROFILES),
-				description: 'Optional model id override for this profile',
-			},
-		);
+			displayOptions: buildProfileDisplayOptions(index, MAX_PROFILES),
+			options: [
+				{
+					displayName: 'Claude Provider Credential',
+					name: 'credential',
+					type: 'options',
+					default: '',
+					noDataExpression: true,
+					description:
+						'Claude Provider credentials from your n8n instance (required at runtime). Changing this reloads the model list below.',
+					typeOptions: {
+						loadOptionsMethod: 'getClaudeProviderCredentials',
+					},
+				},
+				{
+					displayName: 'Model',
+					name: 'modelOverride',
+					type: 'resourceLocator',
+					default: {
+						mode: 'list',
+						value: '',
+						cachedResultName: '',
+					},
+					required: false,
+					noDataExpression: true,
+					description:
+						'Optional. Loaded from GET {baseUrl}/v1/models for the credential above; leave empty to use upstream inferenceModel or credential default.',
+					typeOptions: {
+						loadOptionsDependsOn: ['&credential'],
+					},
+					modes: [
+						{
+							displayName: 'From List',
+							name: 'list',
+							type: 'list',
+							placeholder: 'Select a model…',
+							typeOptions: {
+								searchListMethod: `searchProfile${index}Models`,
+								searchable: true,
+							},
+						},
+						{
+							displayName: 'ID',
+							name: 'id',
+							type: 'string',
+							placeholder: 'model-id',
+						},
+					],
+				},
+			],
+		});
 	}
 	return properties;
 }
 
 export class ClaudeModelSelector implements INodeType {
 	methods = {
-		credentialTest: {
-			claudeProviderCredentialTest,
+		loadOptions: {
+			getClaudeProviderCredentials,
+			...buildProfileModelLoadOptionsMethods(MAX_PROFILES),
+		},
+		listSearch: {
+			...buildProfileModelListSearchMethods(MAX_PROFILES),
 		},
 	};
 
@@ -72,24 +132,20 @@ export class ClaudeModelSelector implements INodeType {
 		},
 		inputs: [NodeConnectionTypes.Main],
 		outputs: [NodeConnectionTypes.Main],
-		credentials: [
-			{
-				name: 'claudeProvider',
-				testedBy: 'claudeProviderCredentialTest',
-			},
-		],
 		properties: [
 			{
 				displayName: 'Number of Profiles',
 				name: 'numberOfProfiles',
 				type: 'number',
 				default: 2,
+				description:
+					'How many provider credentials this node can route across. Use 1 for a single gateway; use 2+ with Rules to pick Profile 2…N.',
 				typeOptions: {
 					minValue: 1,
 					maxValue: MAX_PROFILES,
 				},
 			},
-			...buildProfileProperties(),
+			...buildProfileCollectionProperties(),
 			{
 				displayName: 'Rules',
 				name: 'rules',
@@ -173,16 +229,23 @@ export class ClaudeModelSelector implements INodeType {
 					);
 				}
 
-				const modelOverride = String(
-					this.getNodeParameter(buildProfileModelOverrideFieldName(profileIndex), itemIndex, ''),
-				).trim() || undefined;
+				const itemJson = items[itemIndex].json;
+				const itemModel =
+					(typeof itemJson.inferenceModel === 'string' && itemJson.inferenceModel.trim())
+					|| (typeof itemJson.modelName === 'string' && itemJson.modelName.trim())
+					|| '';
 
-				const modelConfig = await buildModelConfigFromCredentials(this, {
-					credentialFieldName: buildProfileCredentialFieldName(profileIndex),
+				const modelOverride =
+					readProfileModelOverride(this, profileIndex, itemIndex)
+					|| itemModel
+					|| undefined;
+
+				const raw = await loadProfileProviderCredentials(this, profileIndex, itemIndex);
+				const modelConfig = buildModelConfigFromRaw(
+					asCredentialDataObject(raw),
 					modelOverride,
-					itemIndex,
 					profileIndex,
-				});
+				);
 
 				returnData.push({
 					json: {
