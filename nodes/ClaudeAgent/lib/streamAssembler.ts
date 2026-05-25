@@ -48,14 +48,10 @@ export class ClaudeStreamAssembler {
 
 	getOutput(): string {
 		const markdown = this.resolveFinalMarkdown();
-		const markdownTimeline = [
-			...this.markdownSegments.map((content) => ({ type: 'markdown', content })),
-			...(this.markdown.trim() ? [{ type: 'markdown', content: this.markdown.trim() }] : []),
-		];
 		const meta: ClaudeMessageMeta = {
 			timeline: [
 				...(this.thinking ? [{ type: 'thinking', content: this.thinking }] : []),
-				...markdownTimeline,
+				...this.buildMarkdownTimeline(),
 			] as ClaudeMessageMeta['timeline'],
 			toolCalls: this.toolCalls,
 			thinking: this.thinking || undefined,
@@ -64,6 +60,21 @@ export class ClaudeStreamAssembler {
 			sessionId: this.sessionId,
 		};
 		return embedClaudeMessageMeta(markdown, meta);
+	}
+
+	private buildMarkdownTimeline(): Array<{ type: 'markdown'; content: string }> {
+		const blocks: string[] = [];
+		for (const segment of this.markdownSegments) {
+			const trimmed = segment.trim();
+			if (!trimmed) continue;
+			if (blocks.at(-1) === trimmed) continue;
+			blocks.push(trimmed);
+		}
+		const current = this.markdown.trim();
+		if (current && blocks.at(-1) !== current) {
+			blocks.push(current);
+		}
+		return blocks.map((content) => ({ type: 'markdown', content }));
 	}
 
 	private resolveFinalMarkdown(): string {
@@ -173,9 +184,6 @@ export class ClaudeStreamAssembler {
 	}
 
 	private async consumeAssistantMessage(record: Record<string, unknown>): Promise<void> {
-		if (this.completedAssistantMessages > 0) {
-			this.beginNewAssistantMarkdownRound();
-		}
 		this.completedAssistantMessages++;
 
 		const message = record.message as Record<string, unknown> | undefined;
@@ -201,25 +209,26 @@ export class ClaudeStreamAssembler {
 	}
 
 	private async appendAssistantText(text: string): Promise<void> {
-		if (!text) return;
-		if (this.markdown === text) return;
-		if (text.startsWith(this.markdown)) {
-			const suffix = text.slice(this.markdown.length);
+		const trimmed = text.trim();
+		if (!trimmed) return;
+
+		// SDK 常在 stream delta 后再发同内容的 assistant 消息：只补齐缺口，禁止重开一轮或重播全文
+		if (this.markdown.trim() === trimmed) return;
+		const lastSegment = this.markdownSegments.at(-1)?.trim();
+		if (!this.markdown.trim() && lastSegment === trimmed) return;
+
+		if (trimmed.startsWith(this.markdown)) {
+			const suffix = trimmed.slice(this.markdown.length);
+			this.markdown = trimmed;
 			if (!suffix) return;
-			this.markdown += suffix;
 			await this.emit({ kind: 'text', text: suffix });
 			return;
 		}
-		if (this.markdown.startsWith(text)) return;
-		if (this.markdown && text.includes(this.markdown)) {
-			const suffix = text.slice(this.markdown.length);
-			this.markdown = text;
-			if (suffix) await this.emit({ kind: 'text', text: suffix });
-			return;
-		}
+		if (this.markdown.startsWith(trimmed)) return;
+
 		this.beginNewAssistantMarkdownRound();
-		this.markdown = text;
-		await this.emit({ kind: 'text', text });
+		this.markdown = trimmed;
+		await this.emit({ kind: 'text', text: trimmed });
 	}
 
 	private async consumeResultMessage(record: Record<string, unknown>): Promise<void> {

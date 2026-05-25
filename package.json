@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-claude-sdk-agent",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "description": "n8n community nodes — Claude Agent SDK with Model Selector, Provider credentials, streaming, MCP and skills.",
   "keywords": [
     "n8n-community-node-package",
