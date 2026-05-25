@@ -9,50 +9,21 @@ export type ClaudeStreamPayload =
 	| { kind: 'thinking_end'; durationMs?: number }
 	| { kind: 'text'; text: string }
 	| { kind: 'status'; phase: string; message?: string }
-	| { kind: 'session'; sessionId: string }
-	| { kind: 'ask_question'; callId: string; title?: string; questions: unknown[] }
-	| { kind: 'awaiting_input'; requestId: string }
-	| { kind: 'todo_update'; items: Array<{ id: string; content: string; status: string }> }
-	| {
-			kind: 'hitl_checkpoint';
-			executionId: string;
-			resumeUrl: string;
-			pendingQuestion: {
-				callId: string;
-				title?: string;
-				requestId: string;
-				questions: Array<{
-					id: string;
-					prompt: string;
-					options: Array<{ id: string; label: string }>;
-					allowMultiple?: boolean;
-				}>;
-			};
-			segmentIndex: number;
-			requestId: string;
-			callId: string;
-	  };
-
-export interface AgentMetaTodoItem {
-	id: string;
-	content: string;
-	status: string;
-}
-
-export interface AgentMetaPendingQuestion {
-	callId: string;
-	title?: string;
-	requestId: string;
-	questions: Array<{
-		id: string;
-		prompt: string;
-		options: Array<{ id: string; label: string }>;
-		allowMultiple?: boolean;
-	}>;
-}
+	| { kind: 'session'; sessionId: string };
 
 export function encodeClaudeStreamPayload(payload: ClaudeStreamPayload): string {
 	return JSON.stringify({ [CLAUDE_STREAM_MARKER]: payload });
+}
+
+const HIDDEN_TOOL_NAMES = new Set([
+	'AskUserQuestion',
+	'TodoWrite',
+]);
+
+export function shouldShowToolInUi(rawName: string): boolean {
+	if (!rawName) return false;
+	const base = rawName.includes('__') ? rawName.split('__').pop() ?? rawName : rawName;
+	return !HIDDEN_TOOL_NAMES.has(base) && !HIDDEN_TOOL_NAMES.has(rawName);
 }
 
 export function resolveToolLabel(name: string): string {
@@ -71,8 +42,6 @@ export interface ClaudeMessageMeta {
 	usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
 	sessionId?: string;
 	suggestions?: string[];
-	todos?: AgentMetaTodoItem[];
-	pendingQuestion?: AgentMetaPendingQuestion | null;
 }
 
 export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta): string {

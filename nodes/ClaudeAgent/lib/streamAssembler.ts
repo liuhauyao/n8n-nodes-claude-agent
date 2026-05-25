@@ -2,18 +2,10 @@ import {
 	encodeClaudeStreamPayload,
 	embedClaudeMessageMeta,
 	resolveToolLabel,
-	type AgentMetaPendingQuestion,
+	shouldShowToolInUi,
 	type ClaudeMessageMeta,
 	type ClaudeStreamPayload,
 } from './claudeStreamProtocol';
-import {
-	isAskQuestionToolName,
-	isUpdateTodosToolName,
-	parseAskQuestionArgs,
-	parseUpdateTodosArgs,
-	type AskQuestionItem,
-} from './askTodoProtocol';
-import { toAgentPendingQuestion } from './hitlTypes';
 
 export interface StreamSink {
 	onBegin: () => void | Promise<void>;
@@ -26,18 +18,12 @@ export class ClaudeStreamAssembler {
 	private thinking = '';
 	private thinkingStarted = false;
 	private thinkingDurationMs?: number;
+	private completedAssistantMessages = 0;
 	private readonly startedTools = new Set<string>();
 	private readonly toolCalls: ClaudeMessageMeta['toolCalls'] = [];
-	private readonly todos: Array<{ id: string; content: string; status: string }> = [];
 	private sessionId?: string;
 	private usage?: ClaudeMessageMeta['usage'];
 	private fallbackMarkdown = '';
-	private lastAskCallId = '';
-	private lastAskTitle?: string;
-	private lastAskQuestions: AskQuestionItem[] = [];
-	private lastRequestId = '';
-	private awaitingInput = false;
-	private readonly emittedAskQuestions = new Set<string>();
 
 	constructor(private readonly sink: StreamSink) {}
 
@@ -59,27 +45,18 @@ export class ClaudeStreamAssembler {
 		return this.markdown || this.fallbackMarkdown;
 	}
 
-	getOutput(options?: { pendingQuestion?: AgentMetaPendingQuestion | null }): string {
+	getOutput(): string {
 		const markdown = this.markdown || this.fallbackMarkdown;
-		const pendingQuestion =
-			options?.pendingQuestion !== undefined
-				? options.pendingQuestion
-				: this.awaitingInput && this.lastAskCallId
-					? this.getPendingQuestionMeta()
-					: undefined;
 		const meta: ClaudeMessageMeta = {
 			timeline: [
 				...(this.thinking ? [{ type: 'thinking', content: this.thinking }] : []),
 				...(markdown ? [{ type: 'markdown', content: markdown }] : []),
-				...(this.todos.length > 0 ? [{ type: 'todos', items: this.todos }] : []),
 			] as ClaudeMessageMeta['timeline'],
 			toolCalls: this.toolCalls,
 			thinking: this.thinking || undefined,
 			thinkingDurationMs: this.thinkingDurationMs,
 			usage: this.usage,
 			sessionId: this.sessionId,
-			todos: this.todos.length > 0 ? [...this.todos] : undefined,
-			pendingQuestion: pendingQuestion ?? null,
 		};
 		return embedClaudeMessageMeta(markdown, meta);
 	}
@@ -90,39 +67,6 @@ export class ClaudeStreamAssembler {
 
 	getUsage(): ClaudeMessageMeta['usage'] | undefined {
 		return this.usage;
-	}
-
-	isAwaitingInput(): boolean {
-		return this.awaitingInput;
-	}
-
-	getPendingQuestionMeta(): AgentMetaPendingQuestion | undefined {
-		if (!this.lastAskCallId || this.lastAskQuestions.length === 0) return undefined;
-		const requestId = this.lastRequestId || this.lastAskCallId;
-		return toAgentPendingQuestion(
-			this.lastAskCallId,
-			requestId,
-			this.lastAskTitle,
-			this.lastAskQuestions,
-		);
-	}
-
-	async emitHitlCheckpoint(params: {
-		executionId: string;
-		resumeUrl: string;
-		segmentIndex: number;
-	}): Promise<void> {
-		const pendingQuestion = this.getPendingQuestionMeta();
-		if (!pendingQuestion) return;
-		await this.emit({
-			kind: 'hitl_checkpoint',
-			executionId: params.executionId,
-			resumeUrl: params.resumeUrl,
-			pendingQuestion,
-			segmentIndex: params.segmentIndex,
-			requestId: pendingQuestion.requestId,
-			callId: pendingQuestion.callId,
-		});
 	}
 
 	async consume(message: unknown): Promise<void> {
@@ -145,40 +89,18 @@ export class ClaudeStreamAssembler {
 		}
 	}
 
-	private async handleAskQuestionTool(callId: string, args: unknown): Promise<void> {
-		const parsed = parseAskQuestionArgs(args);
-		if (!parsed || this.emittedAskQuestions.has(callId)) return;
-		this.emittedAskQuestions.add(callId);
-		this.lastAskCallId = callId;
-		this.lastAskTitle = parsed.title;
-		this.lastAskQuestions = parsed.questions;
-		this.lastRequestId = callId;
-		this.awaitingInput = true;
-		await this.emit({
-			kind: 'ask_question',
-			callId,
-			title: parsed.title,
-			questions: parsed.questions,
-		});
-		await this.emit({ kind: 'awaiting_input', requestId: callId });
-	}
-
-	private async handleUpdateTodosTool(args: unknown): Promise<void> {
-		const items = parseUpdateTodosArgs(args);
-		if (!items?.length) return;
-		for (const item of items) {
-			const idx = this.todos.findIndex((t) => t.id === item.id);
-			if (idx >= 0) this.todos[idx] = item;
-			else this.todos.push(item);
-		}
-		await this.emit({ kind: 'todo_update', items: [...this.todos] });
-	}
-
 	private async consumeStreamEvent(record: Record<string, unknown>): Promise<void> {
 		const event = record.event;
 		if (!event || typeof event !== 'object') return;
 		const evt = event as Record<string, unknown>;
 		const eventType = evt.type;
+
+		if (eventType === 'message_start') {
+			if (this.completedAssistantMessages > 0) {
+				this.markdown = '';
+			}
+			return;
+		}
 
 		if (eventType === 'content_block_delta') {
 			const delta = evt.delta as Record<string, unknown> | undefined;
@@ -202,24 +124,17 @@ export class ClaudeStreamAssembler {
 			if (block?.type === 'tool_use') {
 				const callId = String(block.id ?? '');
 				const name = String(block.name ?? 'tool');
-				const input = block.input;
-				if (isAskQuestionToolName(name)) {
-					await this.handleAskQuestionTool(callId, input);
-					return;
-				}
-				if (isUpdateTodosToolName(name)) {
-					await this.handleUpdateTodosTool(input);
-					return;
-				}
 				if (callId && !this.startedTools.has(callId)) {
 					this.startedTools.add(callId);
-					this.toolCalls.push({ id: callId, name, label: resolveToolLabel(name), done: false });
-					await this.emit({
-						kind: 'tool_start',
-						callId,
-						name,
-						label: resolveToolLabel(name),
-					});
+					if (shouldShowToolInUi(name)) {
+						this.toolCalls.push({ id: callId, name, label: resolveToolLabel(name), done: false });
+						await this.emit({
+							kind: 'tool_start',
+							callId,
+							name,
+							label: resolveToolLabel(name),
+						});
+					}
 				}
 			}
 		}
@@ -239,6 +154,11 @@ export class ClaudeStreamAssembler {
 	}
 
 	private async consumeAssistantMessage(record: Record<string, unknown>): Promise<void> {
+		if (this.completedAssistantMessages > 0) {
+			this.markdown = '';
+		}
+		this.completedAssistantMessages++;
+
 		const message = record.message as Record<string, unknown> | undefined;
 		const content = message?.content;
 		if (!Array.isArray(content)) return;
@@ -246,27 +166,12 @@ export class ClaudeStreamAssembler {
 			if (!block || typeof block !== 'object') continue;
 			const b = block as Record<string, unknown>;
 			if (b.type === 'text' && typeof b.text === 'string' && b.text) {
-				if (!this.markdown.endsWith(b.text)) {
-					const suffix = b.text.startsWith(this.markdown) ? b.text.slice(this.markdown.length) : b.text;
-					if (suffix) {
-						this.markdown += suffix;
-						await this.emit({ kind: 'text', text: suffix });
-					}
-				}
+				await this.appendAssistantText(b.text);
 			}
 			if (b.type === 'tool_use') {
 				const callId = String(b.id ?? '');
 				const name = String(b.name ?? 'tool');
-				const input = b.input;
-				if (isAskQuestionToolName(name)) {
-					await this.handleAskQuestionTool(callId, input);
-					continue;
-				}
-				if (isUpdateTodosToolName(name)) {
-					await this.handleUpdateTodosTool(input);
-					continue;
-				}
-				if (callId && !this.startedTools.has(callId)) {
+				if (callId && !this.startedTools.has(callId) && shouldShowToolInUi(name)) {
 					this.startedTools.add(callId);
 					this.toolCalls.push({ id: callId, name, label: resolveToolLabel(name), done: true });
 					await this.emit({ kind: 'tool_start', callId, name, label: resolveToolLabel(name) });
@@ -274,6 +179,20 @@ export class ClaudeStreamAssembler {
 				}
 			}
 		}
+	}
+
+	private async appendAssistantText(text: string): Promise<void> {
+		if (!text) return;
+		if (text.startsWith(this.markdown)) {
+			const suffix = text.slice(this.markdown.length);
+			if (!suffix) return;
+			this.markdown += suffix;
+			await this.emit({ kind: 'text', text: suffix });
+			return;
+		}
+		if (this.markdown.startsWith(text)) return;
+		this.markdown = text;
+		await this.emit({ kind: 'text', text });
 	}
 
 	private async consumeResultMessage(record: Record<string, unknown>): Promise<void> {

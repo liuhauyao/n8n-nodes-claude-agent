@@ -1,10 +1,21 @@
 import { redisGet, redisSetEx, type RedisCredentials } from './redisClient';
+import type { IDataObject } from 'n8n-workflow';
 import type { StoredSessionRecord } from '../../shared/lib/types';
 
 const SESSION_KEY_PREFIX = 'claude-agent:session:';
 const DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 7;
 
 export type { RedisCredentials };
+
+export function readRedisCredentials(raw: IDataObject): RedisCredentials {
+	return {
+		host: String(raw.host ?? 'localhost'),
+		port: Number(raw.port ?? 6379),
+		user: raw.user ? String(raw.user) : undefined,
+		password: raw.password ? String(raw.password) : undefined,
+		database: raw.database !== undefined ? Number(raw.database) : 0,
+	};
+}
 
 export async function getStoredSession(
 	credentials: RedisCredentials,

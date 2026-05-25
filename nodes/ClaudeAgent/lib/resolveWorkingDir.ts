@@ -2,7 +2,7 @@ export function resolveWorkingDir(params: {
 	skillsRoot?: string;
 	workingDirectories?: string | string[];
 	legacyWorkingDirectory?: string;
-}): { cwd: string; additionalDirectories: string[] } {
+}): { cwd: string; additionalDirectories: string[] } | undefined {
 	const ordered: string[] = [];
 
 	const skillsRoot = params.skillsRoot?.trim();
@@ -21,7 +21,7 @@ export function resolveWorkingDir(params: {
 
 	const unique = [...new Set(ordered)];
 	if (unique.length === 0) {
-		throw new Error('At least one working directory is required');
+		return undefined;
 	}
 
 	return {

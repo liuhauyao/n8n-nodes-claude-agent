@@ -1,10 +1,8 @@
 import {
 	NodeConnectionTypes,
 	NodeOperationError,
-	type IDataObject,
 	type IExecuteFunctions,
 	type INodeExecutionData,
-	type INodePropertyOptions,
 	type INodeType,
 	type INodeTypeDescription,
 } from 'n8n-workflow';
@@ -17,33 +15,28 @@ import {
 import type { ClaudeModelConfig, StoredSessionRecord } from '../shared/lib/types';
 import { claudeProviderCredentialTest } from '../shared/lib/claudeProviderCredentialTest';
 import { CLAUDE_MODEL_CONFIG_FIELD } from '../shared/lib/types';
+import { CLAUDE_AGENT_OPTIONS_PROPERTY } from './lib/agentOptionsProperties';
 import { loadClaudeSdk } from './lib/loadClaudeSdk';
-import { parseMcpServers, toClaudeSdkMcpServers, type McpServersFormValue } from './lib/parseMcpServers';
+import { parseMcpServers, toClaudeSdkMcpServers } from './lib/parseMcpServers';
 import { resolveWorkingDir } from './lib/resolveWorkingDir';
-import { getStoredSession, setStoredSession, type RedisCredentials } from './lib/sessionStore';
+import {
+	readClaudeAgentRunParams,
+	resolveRedisForSession,
+	tryGetRedisCredentials,
+} from './lib/readNodeParameters';
+import { getStoredSession, setStoredSession } from './lib/sessionStore';
 import { ClaudeStreamAssembler } from './lib/streamAssembler';
-import { formatAskQuestionReply } from './lib/formatAskQuestionReply';
-import {
-	clearHitlPending,
-	getHitlPending,
-	setHitlPending,
-} from './lib/hitlSessionStore';
-import {
-	parseAgentReply,
-	type AgentRunMode,
-	type AgentStatus,
-} from './lib/hitlTypes';
-import { applyHitlSystemMessage, readHitlEnabled } from './lib/hitlConfig';
 
-type SettingSource = 'user' | 'project' | 'local' | 'team' | 'plugins';
+/** Headless n8n 不可用：无交互通道，启用会导致空转循环 */
+const HEADLESS_DISALLOWED_TOOLS = ['AskUserQuestion', 'TodoWrite'] as const;
 
-const SETTING_SOURCE_OPTIONS: INodePropertyOptions[] = [
-	{ name: 'Project', value: 'project', description: 'Load .claude from the working directory' },
-	{ name: 'User', value: 'user' },
-	{ name: 'Local', value: 'local' },
-	{ name: 'Team', value: 'team' },
-	{ name: 'Plugins', value: 'plugins' },
-];
+function mergeDisallowedTools(presetTools?: string[]): string[] {
+	const merged = new Set<string>(HEADLESS_DISALLOWED_TOOLS);
+	if (presetTools) {
+		for (const tool of presetTools) merged.add(tool);
+	}
+	return [...merged];
+}
 
 const PERMISSION_PRESETS: Record<
 	string,
@@ -74,7 +67,6 @@ const PERMISSION_PRESETS: Record<
 	},
 };
 
-/** Legacy alias — removed from UI in 1.0.29; behaves as full_agent. */
 const LEGACY_PERMISSION_PRESET_ALIASES: Record<string, keyof typeof PERMISSION_PRESETS> = {
 	world_assistant: 'full_agent',
 };
@@ -87,34 +79,6 @@ function resolvePermissionPreset(raw: string): keyof typeof PERMISSION_PRESETS {
 	return 'customer_service';
 }
 
-function readRedisCredentials(raw: IDataObject): RedisCredentials {
-	return {
-		host: String(raw.host ?? 'localhost'),
-		port: Number(raw.port ?? 6379),
-		user: raw.user ? String(raw.user) : undefined,
-		password: raw.password ? String(raw.password) : undefined,
-		database: raw.database !== undefined ? Number(raw.database) : 0,
-	};
-}
-
-function readRunMode(raw: string): AgentRunMode {
-	return raw === 'continue_hitl' ? 'continue_hitl' : 'new_turn';
-}
-
-function readSettingSources(raw: string | string[] | undefined): SettingSource[] {
-	if (!raw) return ['project'];
-	const values = Array.isArray(raw) ? raw : [raw];
-	return values.filter(Boolean) as SettingSource[];
-}
-
-function readSkills(raw: string | undefined): string[] | 'all' | undefined {
-	const trimmed = raw?.trim();
-	if (!trimmed) return undefined;
-	if (trimmed.toLowerCase() === 'all') return 'all';
-	return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
-}
-
-/** Resume Claude SDK session only when provider/profile/model unchanged (same chat sessionId). */
 function canResumeClaudeSession(
 	current: ClaudeModelConfig,
 	stored: StoredSessionRecord | undefined,
@@ -141,10 +105,10 @@ export class ClaudeAgent implements INodeType {
 		name: 'claudeAgent',
 		icon: 'file:claude.svg',
 		group: ['transform'],
-		version: 2,
+		version: 3,
 		subtitle: '={{$parameter["modelConfigSource"]}}',
 		description:
-			'Run Claude Code via the Claude Agent SDK with MCP, skills, streaming, and Provider-based model routing',
+			'Run Claude Code via the Claude Agent SDK. User Message and model routing are required; add Options for session, workspace, MCP, or tool permissions.',
 		defaults: {
 			name: 'Claude Agent',
 		},
@@ -163,7 +127,7 @@ export class ClaudeAgent implements INodeType {
 			},
 			{
 				name: 'redis',
-				required: true,
+				required: false,
 			},
 		],
 		properties: [
@@ -226,230 +190,22 @@ export class ClaudeAgent implements INodeType {
 				},
 			},
 			{
+				displayName: 'User Message',
+				name: 'chatInput',
+				type: 'string',
+				default: '',
+				required: true,
+				description: 'Current user message sent to Claude',
+			},
+			{
 				displayName: 'System Message',
 				name: 'systemMessage',
 				type: 'string',
 				typeOptions: { rows: 4 },
 				default: '',
-				description: 'Prepended on the first turn (ignored when resuming an existing session)',
+				description: 'Optional system prompt prepended on the first turn (ignored when resuming a session)',
 			},
-			{
-				displayName: 'User Message',
-				name: 'chatInput',
-				type: 'string',
-				default: '',
-				description: 'Current user message sent to Claude',
-			},
-			{
-				displayName: 'Session ID',
-				name: 'sessionId',
-				type: 'string',
-				default: '',
-				description: 'Business conversation key stored in Redis (maps to Claude SDK session_id)',
-			},
-			{
-				displayName: 'Run Mode',
-				name: 'runMode',
-				type: 'options',
-				options: [
-					{ name: 'New Turn', value: 'new_turn' },
-					{ name: 'Continue HITL', value: 'continue_hitl' },
-				],
-				default: 'new_turn',
-			},
-			{
-				displayName: 'Agent Reply (JSON)',
-				name: 'agentReply',
-				type: 'json',
-				default: {},
-				displayOptions: { show: { runMode: ['continue_hitl'] } },
-			},
-			{
-				displayName: 'Resume URL',
-				name: 'resumeUrl',
-				type: 'string',
-				default: '={{ $execution.resumeUrl }}',
-			},
-			{
-				displayName: 'Execution ID',
-				name: 'executionId',
-				type: 'string',
-				default: '={{ $execution.id }}',
-			},
-			{
-				displayName: 'HITL Segment Index',
-				name: 'segmentIndex',
-				type: 'number',
-				default: 0,
-			},
-			{
-				displayName: 'HITL Enabled',
-				name: 'hitlEnabled',
-				type: 'boolean',
-				default: true,
-				description:
-					'When enabled, AskQuestion pauses the run for human input (n8n Wait + resumeUrl). When disabled, Agent never enters awaiting_input.',
-			},
-			{
-				displayName: 'Permission Preset',
-				name: 'permissionPreset',
-				type: 'options',
-				default: 'customer_service',
-				options: [
-					{ name: 'Restricted — Read/Web + MCP', value: 'customer_service' },
-					{ name: 'Strict Read Only', value: 'read_only' },
-					{ name: 'Full Claude Code Tools', value: 'full_agent' },
-				],
-			},
-			{
-				displayName: 'Skills Root Directory',
-				name: 'skillsRoot',
-				type: 'string',
-				default: '',
-				description: 'Directory containing .claude/skills (placed first in cwd resolution)',
-			},
-			{
-				displayName: 'Working Directories',
-				name: 'workingDirectories',
-				type: 'string',
-				typeOptions: { multipleValues: true },
-				default: [],
-				description: 'Absolute workspace paths combined with Skills Root',
-			},
-			{
-				displayName: 'Working Directory (legacy)',
-				name: 'workingDirectory',
-				type: 'string',
-				default: '',
-				description: 'Deprecated: use Working Directories instead',
-			},
-			{
-				displayName: 'Setting Sources',
-				name: 'settingSources',
-				type: 'multiOptions',
-				options: SETTING_SOURCE_OPTIONS,
-				default: ['project'],
-			},
-			{
-				displayName: 'Skills',
-				name: 'skills',
-				type: 'string',
-				default: '',
-				description: 'Comma-separated skill names, or "all" to enable every discovered skill',
-			},
-			{
-				displayName: 'Max Turns',
-				name: 'maxTurns',
-				type: 'number',
-				default: 0,
-				description: 'Maximum agentic turns (0 = SDK default)',
-			},
-			{
-				displayName: 'Additional Options',
-				name: 'additionalOptions',
-				type: 'collection',
-				placeholder: 'Add Option',
-				default: {},
-				options: [
-					{
-						displayName: 'MCP Servers',
-						name: 'mcpServers',
-						type: 'fixedCollection',
-						typeOptions: { multipleValues: true },
-						default: {},
-						options: [
-							{
-								displayName: 'Server',
-								name: 'server',
-								values: [
-									{ displayName: 'Name', name: 'name', type: 'string', default: '' },
-									{
-										displayName: 'Transport',
-										name: 'transport',
-										type: 'options',
-										options: [
-											{ name: 'HTTP', value: 'http' },
-											{ name: 'SSE', value: 'sse' },
-											{ name: 'Stdio', value: 'stdio' },
-										],
-										default: 'http',
-									},
-									{
-										displayName: 'URL',
-										name: 'url',
-										type: 'string',
-										default: '',
-										displayOptions: { show: { transport: ['http', 'sse'] } },
-									},
-									{
-										displayName: 'Headers JSON',
-										name: 'headersJson',
-										type: 'string',
-										default: '',
-										displayOptions: { show: { transport: ['http', 'sse'] } },
-									},
-									{
-										displayName: 'Command',
-										name: 'command',
-										type: 'string',
-										default: '',
-										displayOptions: { show: { transport: ['stdio'] } },
-									},
-									{
-										displayName: 'Arguments',
-										name: 'args',
-										type: 'string',
-										typeOptions: { multipleValues: true },
-										default: [],
-										displayOptions: { show: { transport: ['stdio'] } },
-									},
-									{
-										displayName: 'Environment JSON',
-										name: 'envJson',
-										type: 'string',
-										default: '',
-										displayOptions: { show: { transport: ['stdio'] } },
-									},
-									{
-										displayName: 'Working Directory',
-										name: 'cwd',
-										type: 'string',
-										default: '',
-										displayOptions: { show: { transport: ['stdio'] } },
-									},
-								],
-							},
-						],
-					},
-					{
-						displayName: 'MCP Servers JSON',
-						name: 'mcpServersJson',
-						type: 'string',
-						typeOptions: { rows: 6 },
-						default: '',
-						description: 'When set, overrides the MCP Servers form',
-					},
-					{
-						displayName: 'Strict MCP Config',
-						name: 'strictMcpConfig',
-						type: 'boolean',
-						default: false,
-						description: 'Ignore project .mcp.json and use only servers configured here',
-					},
-					{
-						displayName: 'Session TTL (Seconds)',
-						name: 'sessionTtlSeconds',
-						type: 'number',
-						default: 604800,
-					},
-					{
-						displayName: 'Use Claude Code System Prompt Preset',
-						name: 'useClaudeCodePreset',
-						type: 'boolean',
-						default: true,
-					},
-				],
-			},
+			CLAUDE_AGENT_OPTIONS_PROPERTY,
 		],
 	};
 
@@ -465,7 +221,7 @@ export class ClaudeAgent implements INodeType {
 			throw new NodeOperationError(this.getNode(), message);
 		}
 
-		const redisCredentials = readRedisCredentials(await this.getCredentials('redis'));
+		const redisCredentials = await tryGetRedisCredentials(this);
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
@@ -474,103 +230,48 @@ export class ClaudeAgent implements INodeType {
 					| 'fromSelector'
 					| 'fromCredential'
 					| 'fromInput';
-				const systemMessageRaw = this.getNodeParameter('systemMessage', itemIndex, '') as string;
-				const chatInput = this.getNodeParameter('chatInput', itemIndex, '') as string;
-				const sessionId = this.getNodeParameter('sessionId', itemIndex, '') as string;
-				const permissionPreset = this.getNodeParameter('permissionPreset', itemIndex, 'customer_service') as string;
-				const skillsRoot = this.getNodeParameter('skillsRoot', itemIndex, '') as string;
-				const workingDirectories = this.getNodeParameter('workingDirectories', itemIndex, []) as string[];
-				const workingDirectory = this.getNodeParameter('workingDirectory', itemIndex, '') as string;
-				const settingSources = readSettingSources(
-					this.getNodeParameter('settingSources', itemIndex, ['project']) as string | string[],
-				);
-				const skills = readSkills(this.getNodeParameter('skills', itemIndex, '') as string);
-				const maxTurnsRaw = Number(this.getNodeParameter('maxTurns', itemIndex, 0));
-				const additionalOptions = this.getNodeParameter('additionalOptions', itemIndex, {}) as IDataObject;
-				const mcpServersForm = (additionalOptions.mcpServers ?? {}) as McpServersFormValue;
-				const mcpServersJson = String(additionalOptions.mcpServersJson ?? '');
-				const strictMcpConfig = Boolean(additionalOptions.strictMcpConfig);
-				const sessionTtlSeconds = Number(additionalOptions.sessionTtlSeconds ?? 604800);
-				const useClaudeCodePreset = additionalOptions.useClaudeCodePreset !== false;
+				const params = readClaudeAgentRunParams(this, itemIndex);
 
-				const runMode = readRunMode(this.getNodeParameter('runMode', itemIndex, 'new_turn') as string);
-				const agentReplyRaw = this.getNodeParameter('agentReply', itemIndex, {}) as unknown;
-				const resumeUrl = String(this.getNodeParameter('resumeUrl', itemIndex, '') ?? '').trim();
-				const executionId = String(this.getNodeParameter('executionId', itemIndex, '') ?? '').trim();
-				const segmentIndex = Number(this.getNodeParameter('segmentIndex', itemIndex, 0) ?? 0);
-				const hitlEnabled = readHitlEnabled(
-					this.getNodeParameter('hitlEnabled', itemIndex, true) as boolean | string,
-				);
-				const systemMessage = applyHitlSystemMessage(systemMessageRaw, hitlEnabled);
-				const agentReply = runMode === 'continue_hitl' ? parseAgentReply(agentReplyRaw) : null;
-
-				if (runMode === 'continue_hitl') {
-					if (!hitlEnabled) {
-						throw new NodeOperationError(this.getNode(), 'HITL is disabled on this node (hitlEnabled=false)', {
-							itemIndex,
-						});
-					}
-					if (!agentReply) {
-						throw new NodeOperationError(this.getNode(), 'agentReply is required for continue_hitl', {
-							itemIndex,
-						});
-					}
-					if (!sessionId) {
-						throw new NodeOperationError(this.getNode(), 'sessionId is required for continue_hitl', {
-							itemIndex,
-						});
-					}
-				} else if (!chatInput?.trim()) {
+				if (!params.chatInput?.trim()) {
 					throw new NodeOperationError(this.getNode(), 'User message (chatInput) is empty', { itemIndex });
 				}
 
-				let modelConfig = await resolveModelConfigForAgent(this, itemIndex, itemJson, {
+				const modelConfig = await resolveModelConfigForAgent(this, itemIndex, itemJson, {
 					modelConfigSource,
 					outputFieldName: String(this.getNodeParameter('configFieldName', itemIndex, CLAUDE_MODEL_CONFIG_FIELD)),
 					modelOverride: String(this.getNodeParameter('modelOverride', itemIndex, '')).trim() || undefined,
 					providerMapJson: String(this.getNodeParameter('providerMapJson', itemIndex, '')),
 				});
 
-				const storedSession = sessionId ? await getStoredSession(redisCredentials, sessionId) : undefined;
+				const redis = resolveRedisForSession(
+					this.getNode(),
+					params.sessionId,
+					redisCredentials,
+					itemIndex,
+				);
+
+				const storedSession = params.sessionId && redis
+					? await getStoredSession(redis, params.sessionId)
+					: undefined;
 				const resumeSession = canResumeClaudeSession(modelConfig, storedSession);
 
-				if (runMode === 'continue_hitl') {
-					const pending = await getHitlPending(redisCredentials, sessionId);
-					if (!pending) {
-						throw new NodeOperationError(this.getNode(), 'No pending HITL state for session', {
-							itemIndex,
-						});
-					}
-					if (
-						pending.requestId !== agentReply!.requestId
-						|| pending.callId !== agentReply!.callId
-					) {
-						throw new NodeOperationError(this.getNode(), 'agentReply does not match pending HITL state', {
-							itemIndex,
-						});
-					}
-				}
+				const resolvedWorkspace = params.hasWorkspaceConfig
+					? resolveWorkingDir({
+						skillsRoot: params.skillsRoot,
+						workingDirectories: params.workingDirectories,
+						legacyWorkingDirectory: params.workingDirectory,
+					})
+					: undefined;
+				const cwd = resolvedWorkspace?.cwd ?? process.cwd();
+				const additionalDirectories = resolvedWorkspace?.additionalDirectories ?? [];
 
-				const { cwd, additionalDirectories } = resolveWorkingDir({
-					skillsRoot,
-					workingDirectories,
-					legacyWorkingDirectory: workingDirectory,
-				});
-
-				const mcpServersParsed = parseMcpServers(mcpServersJson, mcpServersForm);
+				const mcpServersParsed = parseMcpServers(params.mcpServersJson, params.mcpServersForm);
 				const mcpServers = toClaudeSdkMcpServers(mcpServersParsed);
-				const preset = PERMISSION_PRESETS[resolvePermissionPreset(permissionPreset)];
+				const preset = PERMISSION_PRESETS[resolvePermissionPreset(params.permissionPreset)];
 
-				let prompt: string;
-				if (runMode === 'continue_hitl') {
-					const pending = await getHitlPending(redisCredentials, sessionId);
-					prompt = formatAskQuestionReply(agentReply!, pending?.pendingQuestion);
-					await clearHitlPending(redisCredentials, sessionId);
-				} else {
-					prompt = resumeSession
-						? chatInput.trim()
-						: [systemMessage?.trim(), chatInput.trim()].filter(Boolean).join('\n\n---\n\n');
-				}
+				const prompt = resumeSession
+					? params.chatInput.trim()
+					: [params.systemMessage?.trim(), params.chatInput.trim()].filter(Boolean).join('\n\n---\n\n');
 
 				const assembler = new ClaudeStreamAssembler({
 					onBegin: async () => {
@@ -589,7 +290,7 @@ export class ClaudeAgent implements INodeType {
 				const queryOptions: Record<string, unknown> = {
 					cwd,
 					...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
-					settingSources,
+					settingSources: params.hasWorkspaceConfig ? params.settingSources : ['project'],
 					includePartialMessages: true,
 					model: modelConfig.model,
 					env: mergeSdkEnvWithProcess(modelConfig.sdkEnv),
@@ -597,11 +298,11 @@ export class ClaudeAgent implements INodeType {
 						? { resume: storedSession.claudeSessionId }
 						: {}),
 					...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
-					...(strictMcpConfig ? { strictMcpConfig: true } : {}),
-					...(skills ? { skills } : {}),
-					...(maxTurnsRaw > 0 ? { maxTurns: maxTurnsRaw } : {}),
+					...(params.strictMcpConfig ? { strictMcpConfig: true } : {}),
+					...(params.skills ? { skills: params.skills } : {}),
+					...(params.maxTurns > 0 ? { maxTurns: params.maxTurns } : {}),
 					...(preset.allowedTools ? { allowedTools: preset.allowedTools } : {}),
-					...(preset.disallowedTools ? { disallowedTools: preset.disallowedTools } : {}),
+					disallowedTools: mergeDisallowedTools(preset.disallowedTools),
 					...(preset.permissionMode ? { permissionMode: preset.permissionMode } : {}),
 					...(preset.allowDangerouslySkipPermissions
 						? { allowDangerouslySkipPermissions: true }
@@ -609,13 +310,13 @@ export class ClaudeAgent implements INodeType {
 					...(preset.tools ? { tools: preset.tools } : {}),
 				};
 
-				if (useClaudeCodePreset) {
-					const append = systemMessage?.trim();
+				if (params.useClaudeCodePreset) {
+					const append = params.systemMessage?.trim();
 					queryOptions.systemPrompt = append
 						? { type: 'preset', preset: 'claude_code', append }
 						: { type: 'preset', preset: 'claude_code' };
-				} else if (systemMessage?.trim() && !resumeSession) {
-					queryOptions.systemPrompt = systemMessage.trim();
+				} else if (params.systemMessage?.trim() && !resumeSession) {
+					queryOptions.systemPrompt = params.systemMessage.trim();
 				}
 
 				let lastError: string | undefined;
@@ -632,68 +333,36 @@ export class ClaudeAgent implements INodeType {
 
 				await assembler.end();
 
-				let agentStatus: AgentStatus = 'finished';
-				let pendingQuestion = assembler.getPendingQuestionMeta();
-
-				if (assembler.isAwaitingInput() && pendingQuestion && hitlEnabled) {
-					agentStatus = 'awaiting_input';
-					if (sessionId && executionId) {
-						await setHitlPending(redisCredentials, sessionId, {
-							provider: 'claude',
-							agentId: assembler.getSessionId() ?? sessionId,
-							runId: assembler.getSessionId() ?? sessionId,
-							requestId: pendingQuestion.requestId,
-							callId: pendingQuestion.callId,
-							pendingQuestion,
-							executionId,
-							segmentIndex,
-							createdAt: Date.now(),
-						});
-					}
-					if (resumeUrl && executionId) {
-						await assembler.emitHitlCheckpoint({ executionId, resumeUrl, segmentIndex });
-					}
-				} else {
-					pendingQuestion = undefined;
-				}
-
 				if (lastError) {
 					throw new NodeOperationError(this.getNode(), lastError, { itemIndex });
 				}
 
 				const claudeSessionId = assembler.getSessionId()
 					?? (resumeSession ? storedSession?.claudeSessionId : undefined);
-				if (sessionId && claudeSessionId) {
+				if (params.sessionId && claudeSessionId && redis) {
 					await setStoredSession(
-						redisCredentials,
-						sessionId,
+						redis,
+						params.sessionId,
 						{
 							claudeSessionId,
 							modelConfig: modelConfigSummary(modelConfig),
 						},
-						sessionTtlSeconds,
+						params.sessionTtlSeconds,
 					);
 				}
 
 				const usage = assembler.getUsage();
 				returnData.push({
 					json: {
-						output: assembler.getOutput({
-							pendingQuestion: agentStatus === 'awaiting_input' ? pendingQuestion ?? null : null,
-						}),
+						output: assembler.getOutput(),
 						textOutput: assembler.getTextOutput(),
 						model: modelConfig.model,
 						provider: modelConfig.providerType,
 						profileName: modelConfig.profileName,
 						claudeSessionId,
-						sessionId,
+						sessionId: params.sessionId || undefined,
 						costUsd: usage?.costUsd,
 						usage,
-						agentStatus,
-						pendingQuestion: agentStatus === 'awaiting_input' ? pendingQuestion : undefined,
-						segmentIndex,
-						resumeUrl: agentStatus === 'awaiting_input' ? resumeUrl : undefined,
-						executionId: agentStatus === 'awaiting_input' ? executionId : undefined,
 					},
 					pairedItem: { item: itemIndex },
 				});
