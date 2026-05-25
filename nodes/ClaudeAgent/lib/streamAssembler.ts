@@ -15,6 +15,7 @@ export interface StreamSink {
 
 export class ClaudeStreamAssembler {
 	private markdown = '';
+	private readonly markdownSegments: string[] = [];
 	private thinking = '';
 	private thinkingStarted = false;
 	private thinkingDurationMs?: number;
@@ -42,15 +43,19 @@ export class ClaudeStreamAssembler {
 	}
 
 	getTextOutput(): string {
-		return this.markdown || this.fallbackMarkdown;
+		return this.resolveFinalMarkdown();
 	}
 
 	getOutput(): string {
-		const markdown = this.markdown || this.fallbackMarkdown;
+		const markdown = this.resolveFinalMarkdown();
+		const markdownTimeline = [
+			...this.markdownSegments.map((content) => ({ type: 'markdown', content })),
+			...(this.markdown.trim() ? [{ type: 'markdown', content: this.markdown.trim() }] : []),
+		];
 		const meta: ClaudeMessageMeta = {
 			timeline: [
 				...(this.thinking ? [{ type: 'thinking', content: this.thinking }] : []),
-				...(markdown ? [{ type: 'markdown', content: markdown }] : []),
+				...markdownTimeline,
 			] as ClaudeMessageMeta['timeline'],
 			toolCalls: this.toolCalls,
 			thinking: this.thinking || undefined,
@@ -59,6 +64,20 @@ export class ClaudeStreamAssembler {
 			sessionId: this.sessionId,
 		};
 		return embedClaudeMessageMeta(markdown, meta);
+	}
+
+	private resolveFinalMarkdown(): string {
+		if (this.markdown.trim()) return this.markdown.trim();
+		const lastSegment = this.markdownSegments.at(-1);
+		if (lastSegment) return lastSegment;
+		return this.fallbackMarkdown;
+	}
+
+	private beginNewAssistantMarkdownRound(): void {
+		if (this.markdown.trim()) {
+			this.markdownSegments.push(this.markdown.trim());
+		}
+		this.markdown = '';
 	}
 
 	getSessionId(): string | undefined {
@@ -97,7 +116,7 @@ export class ClaudeStreamAssembler {
 
 		if (eventType === 'message_start') {
 			if (this.completedAssistantMessages > 0) {
-				this.markdown = '';
+				this.beginNewAssistantMarkdownRound();
 			}
 			return;
 		}
@@ -155,7 +174,7 @@ export class ClaudeStreamAssembler {
 
 	private async consumeAssistantMessage(record: Record<string, unknown>): Promise<void> {
 		if (this.completedAssistantMessages > 0) {
-			this.markdown = '';
+			this.beginNewAssistantMarkdownRound();
 		}
 		this.completedAssistantMessages++;
 
@@ -183,6 +202,7 @@ export class ClaudeStreamAssembler {
 
 	private async appendAssistantText(text: string): Promise<void> {
 		if (!text) return;
+		if (this.markdown === text) return;
 		if (text.startsWith(this.markdown)) {
 			const suffix = text.slice(this.markdown.length);
 			if (!suffix) return;
@@ -191,6 +211,13 @@ export class ClaudeStreamAssembler {
 			return;
 		}
 		if (this.markdown.startsWith(text)) return;
+		if (this.markdown && text.includes(this.markdown)) {
+			const suffix = text.slice(this.markdown.length);
+			this.markdown = text;
+			if (suffix) await this.emit({ kind: 'text', text: suffix });
+			return;
+		}
+		this.beginNewAssistantMarkdownRound();
 		this.markdown = text;
 		await this.emit({ kind: 'text', text });
 	}
