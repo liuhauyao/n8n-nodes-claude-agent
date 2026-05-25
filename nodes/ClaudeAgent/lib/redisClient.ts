@@ -122,3 +122,7 @@ export async function redisSetEx(
 ): Promise<void> {
 	await runCommand(credentials, 'SET', key, value, 'EX', String(ttlSeconds));
 }
+
+export async function redisDel(credentials: RedisCredentials, key: string): Promise<void> {
+	await runCommand(credentials, 'DEL', key);
+}

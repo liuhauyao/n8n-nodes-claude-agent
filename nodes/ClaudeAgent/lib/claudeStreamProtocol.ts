@@ -12,7 +12,44 @@ export type ClaudeStreamPayload =
 	| { kind: 'session'; sessionId: string }
 	| { kind: 'ask_question'; callId: string; title?: string; questions: unknown[] }
 	| { kind: 'awaiting_input'; requestId: string }
-	| { kind: 'todo_update'; items: Array<{ id: string; content: string; status: string }> };
+	| { kind: 'todo_update'; items: Array<{ id: string; content: string; status: string }> }
+	| {
+			kind: 'hitl_checkpoint';
+			executionId: string;
+			resumeUrl: string;
+			pendingQuestion: {
+				callId: string;
+				title?: string;
+				requestId: string;
+				questions: Array<{
+					id: string;
+					prompt: string;
+					options: Array<{ id: string; label: string }>;
+					allowMultiple?: boolean;
+				}>;
+			};
+			segmentIndex: number;
+			requestId: string;
+			callId: string;
+	  };
+
+export interface AgentMetaTodoItem {
+	id: string;
+	content: string;
+	status: string;
+}
+
+export interface AgentMetaPendingQuestion {
+	callId: string;
+	title?: string;
+	requestId: string;
+	questions: Array<{
+		id: string;
+		prompt: string;
+		options: Array<{ id: string; label: string }>;
+		allowMultiple?: boolean;
+	}>;
+}
 
 export function encodeClaudeStreamPayload(payload: ClaudeStreamPayload): string {
 	return JSON.stringify({ [CLAUDE_STREAM_MARKER]: payload });
@@ -33,6 +70,9 @@ export interface ClaudeMessageMeta {
 	thinkingDurationMs?: number;
 	usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
 	sessionId?: string;
+	suggestions?: string[];
+	todos?: AgentMetaTodoItem[];
+	pendingQuestion?: AgentMetaPendingQuestion | null;
 }
 
 export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta): string {

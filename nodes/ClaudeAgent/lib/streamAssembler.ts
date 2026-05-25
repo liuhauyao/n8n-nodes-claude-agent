@@ -2,9 +2,18 @@ import {
 	encodeClaudeStreamPayload,
 	embedClaudeMessageMeta,
 	resolveToolLabel,
+	type AgentMetaPendingQuestion,
 	type ClaudeMessageMeta,
 	type ClaudeStreamPayload,
 } from './claudeStreamProtocol';
+import {
+	isAskQuestionToolName,
+	isUpdateTodosToolName,
+	parseAskQuestionArgs,
+	parseUpdateTodosArgs,
+	type AskQuestionItem,
+} from './askTodoProtocol';
+import { toAgentPendingQuestion } from './hitlTypes';
 
 export interface StreamSink {
 	onBegin: () => void | Promise<void>;
@@ -19,9 +28,16 @@ export class ClaudeStreamAssembler {
 	private thinkingDurationMs?: number;
 	private readonly startedTools = new Set<string>();
 	private readonly toolCalls: ClaudeMessageMeta['toolCalls'] = [];
+	private readonly todos: Array<{ id: string; content: string; status: string }> = [];
 	private sessionId?: string;
 	private usage?: ClaudeMessageMeta['usage'];
 	private fallbackMarkdown = '';
+	private lastAskCallId = '';
+	private lastAskTitle?: string;
+	private lastAskQuestions: AskQuestionItem[] = [];
+	private lastRequestId = '';
+	private awaitingInput = false;
+	private readonly emittedAskQuestions = new Set<string>();
 
 	constructor(private readonly sink: StreamSink) {}
 
@@ -43,18 +59,27 @@ export class ClaudeStreamAssembler {
 		return this.markdown || this.fallbackMarkdown;
 	}
 
-	getOutput(): string {
+	getOutput(options?: { pendingQuestion?: AgentMetaPendingQuestion | null }): string {
 		const markdown = this.markdown || this.fallbackMarkdown;
+		const pendingQuestion =
+			options?.pendingQuestion !== undefined
+				? options.pendingQuestion
+				: this.awaitingInput && this.lastAskCallId
+					? this.getPendingQuestionMeta()
+					: undefined;
 		const meta: ClaudeMessageMeta = {
 			timeline: [
 				...(this.thinking ? [{ type: 'thinking', content: this.thinking }] : []),
 				...(markdown ? [{ type: 'markdown', content: markdown }] : []),
-			],
+				...(this.todos.length > 0 ? [{ type: 'todos', items: this.todos }] : []),
+			] as ClaudeMessageMeta['timeline'],
 			toolCalls: this.toolCalls,
 			thinking: this.thinking || undefined,
 			thinkingDurationMs: this.thinkingDurationMs,
 			usage: this.usage,
 			sessionId: this.sessionId,
+			todos: this.todos.length > 0 ? [...this.todos] : undefined,
+			pendingQuestion: pendingQuestion ?? null,
 		};
 		return embedClaudeMessageMeta(markdown, meta);
 	}
@@ -65,6 +90,39 @@ export class ClaudeStreamAssembler {
 
 	getUsage(): ClaudeMessageMeta['usage'] | undefined {
 		return this.usage;
+	}
+
+	isAwaitingInput(): boolean {
+		return this.awaitingInput;
+	}
+
+	getPendingQuestionMeta(): AgentMetaPendingQuestion | undefined {
+		if (!this.lastAskCallId || this.lastAskQuestions.length === 0) return undefined;
+		const requestId = this.lastRequestId || this.lastAskCallId;
+		return toAgentPendingQuestion(
+			this.lastAskCallId,
+			requestId,
+			this.lastAskTitle,
+			this.lastAskQuestions,
+		);
+	}
+
+	async emitHitlCheckpoint(params: {
+		executionId: string;
+		resumeUrl: string;
+		segmentIndex: number;
+	}): Promise<void> {
+		const pendingQuestion = this.getPendingQuestionMeta();
+		if (!pendingQuestion) return;
+		await this.emit({
+			kind: 'hitl_checkpoint',
+			executionId: params.executionId,
+			resumeUrl: params.resumeUrl,
+			pendingQuestion,
+			segmentIndex: params.segmentIndex,
+			requestId: pendingQuestion.requestId,
+			callId: pendingQuestion.callId,
+		});
 	}
 
 	async consume(message: unknown): Promise<void> {
@@ -85,6 +143,35 @@ export class ClaudeStreamAssembler {
 		if (type === 'result') {
 			await this.consumeResultMessage(record);
 		}
+	}
+
+	private async handleAskQuestionTool(callId: string, args: unknown): Promise<void> {
+		const parsed = parseAskQuestionArgs(args);
+		if (!parsed || this.emittedAskQuestions.has(callId)) return;
+		this.emittedAskQuestions.add(callId);
+		this.lastAskCallId = callId;
+		this.lastAskTitle = parsed.title;
+		this.lastAskQuestions = parsed.questions;
+		this.lastRequestId = callId;
+		this.awaitingInput = true;
+		await this.emit({
+			kind: 'ask_question',
+			callId,
+			title: parsed.title,
+			questions: parsed.questions,
+		});
+		await this.emit({ kind: 'awaiting_input', requestId: callId });
+	}
+
+	private async handleUpdateTodosTool(args: unknown): Promise<void> {
+		const items = parseUpdateTodosArgs(args);
+		if (!items?.length) return;
+		for (const item of items) {
+			const idx = this.todos.findIndex((t) => t.id === item.id);
+			if (idx >= 0) this.todos[idx] = item;
+			else this.todos.push(item);
+		}
+		await this.emit({ kind: 'todo_update', items: [...this.todos] });
 	}
 
 	private async consumeStreamEvent(record: Record<string, unknown>): Promise<void> {
@@ -115,6 +202,15 @@ export class ClaudeStreamAssembler {
 			if (block?.type === 'tool_use') {
 				const callId = String(block.id ?? '');
 				const name = String(block.name ?? 'tool');
+				const input = block.input;
+				if (isAskQuestionToolName(name)) {
+					await this.handleAskQuestionTool(callId, input);
+					return;
+				}
+				if (isUpdateTodosToolName(name)) {
+					await this.handleUpdateTodosTool(input);
+					return;
+				}
 				if (callId && !this.startedTools.has(callId)) {
 					this.startedTools.add(callId);
 					this.toolCalls.push({ id: callId, name, label: resolveToolLabel(name), done: false });
@@ -129,13 +225,10 @@ export class ClaudeStreamAssembler {
 		}
 
 		if (eventType === 'content_block_stop') {
-			const index = evt.index;
-			if (typeof index === 'number') {
-				const pending = this.toolCalls.find((t) => !t.done);
-				if (pending) {
-					pending.done = true;
-					await this.emit({ kind: 'tool_end', callId: pending.id, ok: true });
-				}
+			const pending = this.toolCalls.find((t) => !t.done);
+			if (pending) {
+				pending.done = true;
+				await this.emit({ kind: 'tool_end', callId: pending.id, ok: true });
 			}
 		}
 
@@ -164,6 +257,15 @@ export class ClaudeStreamAssembler {
 			if (b.type === 'tool_use') {
 				const callId = String(b.id ?? '');
 				const name = String(b.name ?? 'tool');
+				const input = b.input;
+				if (isAskQuestionToolName(name)) {
+					await this.handleAskQuestionTool(callId, input);
+					continue;
+				}
+				if (isUpdateTodosToolName(name)) {
+					await this.handleUpdateTodosTool(input);
+					continue;
+				}
 				if (callId && !this.startedTools.has(callId)) {
 					this.startedTools.add(callId);
 					this.toolCalls.push({ id: callId, name, label: resolveToolLabel(name), done: true });

@@ -22,6 +22,18 @@ import { parseMcpServers, toClaudeSdkMcpServers, type McpServersFormValue } from
 import { resolveWorkingDir } from './lib/resolveWorkingDir';
 import { getStoredSession, setStoredSession, type RedisCredentials } from './lib/sessionStore';
 import { ClaudeStreamAssembler } from './lib/streamAssembler';
+import { formatAskQuestionReply } from './lib/formatAskQuestionReply';
+import {
+	clearHitlPending,
+	getHitlPending,
+	setHitlPending,
+} from './lib/hitlSessionStore';
+import {
+	parseAgentReply,
+	type AgentRunMode,
+	type AgentStatus,
+} from './lib/hitlTypes';
+import { applyHitlSystemMessage, readHitlEnabled } from './lib/hitlConfig';
 
 type SettingSource = 'user' | 'project' | 'local' | 'team' | 'plugins';
 
@@ -85,6 +97,10 @@ function readRedisCredentials(raw: IDataObject): RedisCredentials {
 	};
 }
 
+function readRunMode(raw: string): AgentRunMode {
+	return raw === 'continue_hitl' ? 'continue_hitl' : 'new_turn';
+}
+
 function readSettingSources(raw: string | string[] | undefined): SettingSource[] {
 	if (!raw) return ['project'];
 	const values = Array.isArray(raw) ? raw : [raw];
@@ -125,7 +141,7 @@ export class ClaudeAgent implements INodeType {
 		name: 'claudeAgent',
 		icon: 'file:claude.svg',
 		group: ['transform'],
-		version: 1,
+		version: 2,
 		subtitle: '={{$parameter["modelConfigSource"]}}',
 		description:
 			'Run Claude Code via the Claude Agent SDK with MCP, skills, streaming, and Provider-based model routing',
@@ -230,6 +246,49 @@ export class ClaudeAgent implements INodeType {
 				type: 'string',
 				default: '',
 				description: 'Business conversation key stored in Redis (maps to Claude SDK session_id)',
+			},
+			{
+				displayName: 'Run Mode',
+				name: 'runMode',
+				type: 'options',
+				options: [
+					{ name: 'New Turn', value: 'new_turn' },
+					{ name: 'Continue HITL', value: 'continue_hitl' },
+				],
+				default: 'new_turn',
+			},
+			{
+				displayName: 'Agent Reply (JSON)',
+				name: 'agentReply',
+				type: 'json',
+				default: {},
+				displayOptions: { show: { runMode: ['continue_hitl'] } },
+			},
+			{
+				displayName: 'Resume URL',
+				name: 'resumeUrl',
+				type: 'string',
+				default: '={{ $execution.resumeUrl }}',
+			},
+			{
+				displayName: 'Execution ID',
+				name: 'executionId',
+				type: 'string',
+				default: '={{ $execution.id }}',
+			},
+			{
+				displayName: 'HITL Segment Index',
+				name: 'segmentIndex',
+				type: 'number',
+				default: 0,
+			},
+			{
+				displayName: 'HITL Enabled',
+				name: 'hitlEnabled',
+				type: 'boolean',
+				default: true,
+				description:
+					'When enabled, AskQuestion pauses the run for human input (n8n Wait + resumeUrl). When disabled, Agent never enters awaiting_input.',
 			},
 			{
 				displayName: 'Permission Preset',
@@ -415,7 +474,7 @@ export class ClaudeAgent implements INodeType {
 					| 'fromSelector'
 					| 'fromCredential'
 					| 'fromInput';
-				const systemMessage = this.getNodeParameter('systemMessage', itemIndex, '') as string;
+				const systemMessageRaw = this.getNodeParameter('systemMessage', itemIndex, '') as string;
 				const chatInput = this.getNodeParameter('chatInput', itemIndex, '') as string;
 				const sessionId = this.getNodeParameter('sessionId', itemIndex, '') as string;
 				const permissionPreset = this.getNodeParameter('permissionPreset', itemIndex, 'customer_service') as string;
@@ -434,7 +493,34 @@ export class ClaudeAgent implements INodeType {
 				const sessionTtlSeconds = Number(additionalOptions.sessionTtlSeconds ?? 604800);
 				const useClaudeCodePreset = additionalOptions.useClaudeCodePreset !== false;
 
-				if (!chatInput?.trim()) {
+				const runMode = readRunMode(this.getNodeParameter('runMode', itemIndex, 'new_turn') as string);
+				const agentReplyRaw = this.getNodeParameter('agentReply', itemIndex, {}) as unknown;
+				const resumeUrl = String(this.getNodeParameter('resumeUrl', itemIndex, '') ?? '').trim();
+				const executionId = String(this.getNodeParameter('executionId', itemIndex, '') ?? '').trim();
+				const segmentIndex = Number(this.getNodeParameter('segmentIndex', itemIndex, 0) ?? 0);
+				const hitlEnabled = readHitlEnabled(
+					this.getNodeParameter('hitlEnabled', itemIndex, true) as boolean | string,
+				);
+				const systemMessage = applyHitlSystemMessage(systemMessageRaw, hitlEnabled);
+				const agentReply = runMode === 'continue_hitl' ? parseAgentReply(agentReplyRaw) : null;
+
+				if (runMode === 'continue_hitl') {
+					if (!hitlEnabled) {
+						throw new NodeOperationError(this.getNode(), 'HITL is disabled on this node (hitlEnabled=false)', {
+							itemIndex,
+						});
+					}
+					if (!agentReply) {
+						throw new NodeOperationError(this.getNode(), 'agentReply is required for continue_hitl', {
+							itemIndex,
+						});
+					}
+					if (!sessionId) {
+						throw new NodeOperationError(this.getNode(), 'sessionId is required for continue_hitl', {
+							itemIndex,
+						});
+					}
+				} else if (!chatInput?.trim()) {
 					throw new NodeOperationError(this.getNode(), 'User message (chatInput) is empty', { itemIndex });
 				}
 
@@ -448,6 +534,23 @@ export class ClaudeAgent implements INodeType {
 				const storedSession = sessionId ? await getStoredSession(redisCredentials, sessionId) : undefined;
 				const resumeSession = canResumeClaudeSession(modelConfig, storedSession);
 
+				if (runMode === 'continue_hitl') {
+					const pending = await getHitlPending(redisCredentials, sessionId);
+					if (!pending) {
+						throw new NodeOperationError(this.getNode(), 'No pending HITL state for session', {
+							itemIndex,
+						});
+					}
+					if (
+						pending.requestId !== agentReply!.requestId
+						|| pending.callId !== agentReply!.callId
+					) {
+						throw new NodeOperationError(this.getNode(), 'agentReply does not match pending HITL state', {
+							itemIndex,
+						});
+					}
+				}
+
 				const { cwd, additionalDirectories } = resolveWorkingDir({
 					skillsRoot,
 					workingDirectories,
@@ -458,9 +561,16 @@ export class ClaudeAgent implements INodeType {
 				const mcpServers = toClaudeSdkMcpServers(mcpServersParsed);
 				const preset = PERMISSION_PRESETS[resolvePermissionPreset(permissionPreset)];
 
-				const prompt = resumeSession
-					? chatInput.trim()
-					: [systemMessage?.trim(), chatInput.trim()].filter(Boolean).join('\n\n---\n\n');
+				let prompt: string;
+				if (runMode === 'continue_hitl') {
+					const pending = await getHitlPending(redisCredentials, sessionId);
+					prompt = formatAskQuestionReply(agentReply!, pending?.pendingQuestion);
+					await clearHitlPending(redisCredentials, sessionId);
+				} else {
+					prompt = resumeSession
+						? chatInput.trim()
+						: [systemMessage?.trim(), chatInput.trim()].filter(Boolean).join('\n\n---\n\n');
+				}
 
 				const assembler = new ClaudeStreamAssembler({
 					onBegin: async () => {
@@ -522,6 +632,31 @@ export class ClaudeAgent implements INodeType {
 
 				await assembler.end();
 
+				let agentStatus: AgentStatus = 'finished';
+				let pendingQuestion = assembler.getPendingQuestionMeta();
+
+				if (assembler.isAwaitingInput() && pendingQuestion && hitlEnabled) {
+					agentStatus = 'awaiting_input';
+					if (sessionId && executionId) {
+						await setHitlPending(redisCredentials, sessionId, {
+							provider: 'claude',
+							agentId: assembler.getSessionId() ?? sessionId,
+							runId: assembler.getSessionId() ?? sessionId,
+							requestId: pendingQuestion.requestId,
+							callId: pendingQuestion.callId,
+							pendingQuestion,
+							executionId,
+							segmentIndex,
+							createdAt: Date.now(),
+						});
+					}
+					if (resumeUrl && executionId) {
+						await assembler.emitHitlCheckpoint({ executionId, resumeUrl, segmentIndex });
+					}
+				} else {
+					pendingQuestion = undefined;
+				}
+
 				if (lastError) {
 					throw new NodeOperationError(this.getNode(), lastError, { itemIndex });
 				}
@@ -543,7 +678,9 @@ export class ClaudeAgent implements INodeType {
 				const usage = assembler.getUsage();
 				returnData.push({
 					json: {
-						output: assembler.getOutput(),
+						output: assembler.getOutput({
+							pendingQuestion: agentStatus === 'awaiting_input' ? pendingQuestion ?? null : null,
+						}),
 						textOutput: assembler.getTextOutput(),
 						model: modelConfig.model,
 						provider: modelConfig.providerType,
@@ -552,6 +689,11 @@ export class ClaudeAgent implements INodeType {
 						sessionId,
 						costUsd: usage?.costUsd,
 						usage,
+						agentStatus,
+						pendingQuestion: agentStatus === 'awaiting_input' ? pendingQuestion : undefined,
+						segmentIndex,
+						resumeUrl: agentStatus === 'awaiting_input' ? resumeUrl : undefined,
+						executionId: agentStatus === 'awaiting_input' ? executionId : undefined,
 					},
 					pairedItem: { item: itemIndex },
 				});
