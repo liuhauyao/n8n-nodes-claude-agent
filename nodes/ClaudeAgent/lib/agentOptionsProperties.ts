@@ -97,8 +97,10 @@ export const CLAUDE_AGENT_OPTIONS_PROPERTY: INodeProperties = {
 					type: 'options',
 					default: 'customer_service',
 					options: [
-						{ name: 'Restricted — Read/Web + MCP', value: 'customer_service' },
-						{ name: 'Strict Read Only', value: 'read_only' },
+						{ name: 'MCP + Skills Only', value: 'mcp_skills_only' },
+						{ name: 'Plan — No Tools', value: 'plan_only' },
+						{ name: 'Restricted — Read/Web + MCP (Legacy)', value: 'customer_service' },
+						{ name: 'Strict Read Only (Legacy)', value: 'read_only' },
 						{ name: 'Full Claude Code Tools', value: 'full_agent' },
 					],
 				},

@@ -38,16 +38,16 @@ function mergeDisallowedTools(presetTools?: string[]): string[] {
 	return [...merged];
 }
 
-const PERMISSION_PRESETS: Record<
-	string,
-	{
-		allowedTools?: string[];
-		disallowedTools?: string[];
-		permissionMode?: string;
-		allowDangerouslySkipPermissions?: boolean;
-		tools?: { type: 'preset'; preset: 'claude_code' };
-	}
-> = {
+type PermissionPresetConfig = {
+	allowedTools?: string[];
+	disallowedTools?: string[];
+	permissionMode?: string;
+	allowDangerouslySkipPermissions?: boolean;
+	tools?: { type: 'preset'; preset: 'claude_code' } | readonly [];
+	defaultStrictMcpConfig?: boolean;
+};
+
+const PERMISSION_PRESETS: Record<string, PermissionPresetConfig> = {
 	customer_service: {
 		allowedTools: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
 		disallowedTools: ['Bash', 'Write', 'Edit'],
@@ -59,6 +59,25 @@ const PERMISSION_PRESETS: Record<
 		disallowedTools: ['Bash', 'Write', 'Edit'],
 		permissionMode: 'bypassPermissions',
 		allowDangerouslySkipPermissions: true,
+	},
+	mcp_skills_only: {
+		// 保留 claude_code 工具注册，便于流式输出 tool_start/tool_end；执行由 disallowedTools + dontAsk 拦截
+		tools: { type: 'preset', preset: 'claude_code' },
+		disallowedTools: [
+			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
+			'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
+		],
+		permissionMode: 'dontAsk',
+		defaultStrictMcpConfig: true,
+	},
+	plan_only: {
+		tools: { type: 'preset', preset: 'claude_code' },
+		disallowedTools: [
+			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
+			'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
+		],
+		// dontAsk：工具调用仍出现在流式 UI，但一律拒绝执行（plan 模式则完全不产生 tool 事件）
+		permissionMode: 'dontAsk',
 	},
 	full_agent: {
 		tools: { type: 'preset', preset: 'claude_code' },
@@ -267,7 +286,9 @@ export class ClaudeAgent implements INodeType {
 
 				const mcpServersParsed = parseMcpServers(params.mcpServersJson, params.mcpServersForm);
 				const mcpServers = toClaudeSdkMcpServers(mcpServersParsed);
-				const preset = PERMISSION_PRESETS[resolvePermissionPreset(params.permissionPreset)];
+				const presetKey = resolvePermissionPreset(params.permissionPreset);
+				const preset = PERMISSION_PRESETS[presetKey];
+				const strictMcpConfig = params.strictMcpConfig || preset.defaultStrictMcpConfig === true;
 
 				const prompt = resumeSession
 					? params.chatInput.trim()
@@ -298,7 +319,7 @@ export class ClaudeAgent implements INodeType {
 						? { resume: storedSession.claudeSessionId }
 						: {}),
 					...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
-					...(params.strictMcpConfig ? { strictMcpConfig: true } : {}),
+					...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 					...(params.skills ? { skills: params.skills } : {}),
 					...(params.maxTurns > 0 ? { maxTurns: params.maxTurns } : {}),
 					...(preset.allowedTools ? { allowedTools: preset.allowedTools } : {}),
@@ -307,7 +328,13 @@ export class ClaudeAgent implements INodeType {
 					...(preset.allowDangerouslySkipPermissions
 						? { allowDangerouslySkipPermissions: true }
 						: {}),
-					...(preset.tools ? { tools: preset.tools } : {}),
+					...(preset.tools !== undefined
+						? {
+							tools: Array.isArray(preset.tools)
+								? []
+								: preset.tools,
+						}
+						: {}),
 				};
 
 				if (params.useClaudeCodePreset) {
