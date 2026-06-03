@@ -1,5 +1,7 @@
 import type { INodeProperties } from 'n8n-workflow';
 
+import { MCP_TOOL_FILTER_PROPERTIES } from './mcpToolFilterProperties';
+
 export const MCP_SERVER_OPTION_PROPERTIES: INodeProperties[] = [
 	{
 		displayName: 'MCP Servers',
@@ -86,4 +88,5 @@ export const MCP_SERVER_OPTION_PROPERTIES: INodeProperties[] = [
 		default: false,
 		description: 'Ignore project .mcp.json and use only servers configured here',
 	},
+	...MCP_TOOL_FILTER_PROPERTIES,
 ];

@@ -1,5 +1,6 @@
 import { NodeOperationError, type IDataObject, type IExecuteFunctions, type INode } from 'n8n-workflow';
 
+import type { McpToolAccessConfig } from './mcpToolAccess';
 import type { McpServersFormValue } from './parseMcpServers';
 import { readRedisCredentials, type RedisCredentials } from './sessionStore';
 
@@ -21,6 +22,7 @@ export interface ClaudeAgentRunParams {
 	strictMcpConfig: boolean;
 	mcpServersForm: McpServersFormValue;
 	mcpServersJson: string;
+	mcpToolAccess: McpToolAccessConfig;
 	hasWorkspaceConfig: boolean;
 }
 
@@ -115,6 +117,14 @@ export function readClaudeAgentRunParams(
 	const mcpServersJson = pickString(mcp.mcpServersJson)
 		|| pickString(legacyAdditional.mcpServersJson);
 
+	const mcpToolAccessRaw = (mcp.mcpToolAccess ?? {}) as IDataObject;
+	const mcpToolAccess: McpToolAccessConfig = {
+		filterMode: (pickString(mcpToolAccessRaw.filterMode) || 'none') as McpToolAccessConfig['filterMode'],
+		deniedToolsRaw: pickString(mcpToolAccessRaw.deniedTools),
+		allowedToolsRaw: pickString(mcpToolAccessRaw.allowedTools),
+		allowComplementCatalogRaw: pickString(mcpToolAccessRaw.allowComplementCatalog),
+	};
+
 	const hasWorkspaceConfig = Boolean(
 		skillsRoot.trim()
 		|| workingDirectories.length > 0
@@ -140,6 +150,7 @@ export function readClaudeAgentRunParams(
 		strictMcpConfig,
 		mcpServersForm,
 		mcpServersJson,
+		mcpToolAccess,
 		hasWorkspaceConfig,
 	};
 }

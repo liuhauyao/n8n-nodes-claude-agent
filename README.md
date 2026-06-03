@@ -91,7 +91,7 @@ Use **Custom Model ID** when the gateway does not expose `/v1/models`.
 | Model Config Source | `fromSelector` / `fromCredential` / `fromInput` |
 | Permission Preset | Description |
 |-------------------|-------------|
-| **`mcp_skills_only`** | **灵感助手推荐。** 内置工具经 `disallowedTools` + `dontAsk` **拒绝执行**，但流式 UI 仍展示 tool 调用；MCP + skills 可用。自动 `strictMcpConfig`。 |
+| **`mcp_skills_only`** | **灵感助手推荐。** 内置工具经 `disallowedTools` + `dontAsk` **拒绝执行**；MCP 在 Deny/No Filter 下自动写入 `allowedTools: mcp__{server}__*`（`dontAsk` 须预批准，否则 MCP 会被免询问拒绝）。自动 `strictMcpConfig`。 |
 | **`plan_only`** | **平台客服推荐。** 全部内置工具拒绝执行（`dontAsk`），流式 UI 仍可见被拒绝的调用；工作流侧不配 MCP。 |
 | `customer_service` | Legacy: Read/Grep/Glob/Web + MCP; still allows local file reads. |
 | `read_only` | Legacy: Read/Grep/Glob + MCP. |
@@ -108,6 +108,24 @@ Use **Custom Model ID** when the gateway does not expose `/v1/models`.
 | `full_agent` | All | Yes | Yes | Internal dev |
 
 **Workspace guidance:** For `mcp_skills_only` / `plan_only`, set **Skills Root** to the skills directory only; do **not** mount source repos (`matrees-backend`, etc.) in Working Directories.
+
+### MCP Tool Filter (Options → MCP)
+
+| Filter Mode | Behavior |
+|-------------|----------|
+| **No Filter** (default) | All tools from MCP `tools/list` remain available. |
+| **Deny List** | Deny listed bare tool names on every configured MCP server (Claude: `disallowedTools` as `mcp__{server}__{tool}`). With `mcp_skills_only`, also pre-approves `mcp__{server}__*` (aligned with Cursor `Mcp(server:*)`). |
+| **Allow List** | Allow listed tools only (no server wildcard); optionally fill **Tool Catalog** to deny everything else. |
+
+**Claude vs Cursor（MCP 权限）**
+
+| 环节 | Cursor Agent | Claude Agent (`mcp_skills_only`) |
+|------|----------------|----------------------------------|
+| 本地 Read/Shell | `.cursor/cli.json` deny | `disallowedTools` + `dontAsk` |
+| MCP 默认可用 | Deny 模式下 `cli.json` 写入 `Mcp(server:*)` | ≥1.3.9：`allowedTools` 写入 `mcp__server__*` |
+| 未预批准时 | CLI 拒绝 | `dontAsk` → 免询问拒绝（表现为「调用不了 MCP」） |
+
+官方：[MCP permissions](https://code.claude.com/docs/en/agent-sdk/mcp) — MCP 须 `allowedTools`；`acceptEdits` **不会**自动批准 MCP。
 
 Streaming uses `__claude__` JSON chunks (aligned with Matrees `useClaudeStreamParser`).
 

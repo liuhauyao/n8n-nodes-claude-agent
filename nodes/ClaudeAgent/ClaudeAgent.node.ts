@@ -17,6 +17,14 @@ import { claudeProviderCredentialTest } from '../shared/lib/claudeProviderCreden
 import { CLAUDE_MODEL_CONFIG_FIELD } from '../shared/lib/types';
 import { CLAUDE_AGENT_OPTIONS_PROPERTY } from './lib/agentOptionsProperties';
 import { loadClaudeSdk } from './lib/loadClaudeSdk';
+import {
+	buildClaudeMcpAllowedTools,
+	buildClaudeMcpDisallowedTools,
+	listMcpServerNames,
+	resolveAllowedMcpToolNames,
+	resolveClaudeMcpPreApprovedTools,
+	resolveDeniedMcpToolNames,
+} from './lib/mcpToolAccess';
 import { parseMcpServers, toClaudeSdkMcpServers } from './lib/parseMcpServers';
 import { resolveWorkingDir } from './lib/resolveWorkingDir';
 import {
@@ -286,7 +294,18 @@ export class ClaudeAgent implements INodeType {
 
 				const mcpServersParsed = parseMcpServers(params.mcpServersJson, params.mcpServersForm);
 				const mcpServers = toClaudeSdkMcpServers(mcpServersParsed);
+				const mcpServerNames = listMcpServerNames(mcpServersParsed);
+				const deniedMcpTools = resolveDeniedMcpToolNames(params.mcpToolAccess);
+				const allowedMcpTools = resolveAllowedMcpToolNames(params.mcpToolAccess);
+				const mcpDisallowedSdk = buildClaudeMcpDisallowedTools(mcpServerNames, deniedMcpTools);
+				const mcpAllowedSdk = buildClaudeMcpAllowedTools(mcpServerNames, allowedMcpTools);
 				const presetKey = resolvePermissionPreset(params.permissionPreset);
+				const mcpPreApproved = resolveClaudeMcpPreApprovedTools(
+					presetKey === 'mcp_skills_only',
+					mcpServerNames,
+					params.mcpToolAccess,
+					mcpAllowedSdk,
+				);
 				const preset = PERMISSION_PRESETS[presetKey];
 				const strictMcpConfig = params.strictMcpConfig || preset.defaultStrictMcpConfig === true;
 
@@ -322,8 +341,18 @@ export class ClaudeAgent implements INodeType {
 					...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 					...(params.skills ? { skills: params.skills } : {}),
 					...(params.maxTurns > 0 ? { maxTurns: params.maxTurns } : {}),
-					...(preset.allowedTools ? { allowedTools: preset.allowedTools } : {}),
-					disallowedTools: mergeDisallowedTools(preset.disallowedTools),
+					...(preset.allowedTools || mcpPreApproved.length > 0
+						? {
+							allowedTools: [
+								...(preset.allowedTools ?? []),
+								...mcpPreApproved,
+							],
+						}
+						: {}),
+					disallowedTools: mergeDisallowedTools([
+						...(preset.disallowedTools ?? []),
+						...mcpDisallowedSdk,
+					]),
 					...(preset.permissionMode ? { permissionMode: preset.permissionMode } : {}),
 					...(preset.allowDangerouslySkipPermissions
 						? { allowDangerouslySkipPermissions: true }
