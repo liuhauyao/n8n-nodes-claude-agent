@@ -129,6 +129,17 @@ Use **Custom Model ID** when the gateway does not expose `/v1/models`.
 
 Streaming uses `__claude__` JSON chunks (aligned with Matrees `useClaudeStreamParser`).
 
+### 输出字段
+
+| 字段 | 说明 |
+|------|------|
+| `output` | 完整落库正文：Markdown（含 Agent 原文中的 `<next>`）+ `<claude_meta>`（toolCalls / timeline / suggestions） |
+| `textOutput` | 纯 Markdown 正文（无 `<next>`、无 `<claude_meta>`，供生图等下游直接使用） |
+| `claudeSessionId` | Claude SDK 会话 id |
+| `usage` / `costUsd` | Token 与费用（若有） |
+
+与 Cursor Agent 节点语义一致：灵感助手工作流落库用 `output`；生图「处理提示词」优先读 `textOutput`。
+
 ---
 
 ## Local POC

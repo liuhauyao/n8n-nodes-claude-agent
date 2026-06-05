@@ -1,8 +1,11 @@
 import {
 	encodeClaudeStreamPayload,
 	embedClaudeMessageMeta,
+	extractNextSuggestions,
 	resolveToolLabel,
 	shouldShowToolInUi,
+	stripClaudeMessageMeta,
+	stripNextTags,
 	type ClaudeMessageMeta,
 	type ClaudeStreamPayload,
 } from './claudeStreamProtocol';
@@ -43,11 +46,14 @@ export class ClaudeStreamAssembler {
 	}
 
 	getTextOutput(): string {
-		return this.resolveFinalMarkdown();
+		let markdown = this.resolveFinalMarkdown();
+		markdown = stripNextTags(stripClaudeMessageMeta(markdown));
+		return markdown.trim();
 	}
 
 	getOutput(): string {
 		const markdown = this.resolveFinalMarkdown();
+		const suggestions = extractNextSuggestions(markdown);
 		const meta: ClaudeMessageMeta = {
 			timeline: [
 				...(this.thinking ? [{ type: 'thinking', content: this.thinking }] : []),
@@ -58,6 +64,7 @@ export class ClaudeStreamAssembler {
 			thinkingDurationMs: this.thinkingDurationMs,
 			usage: this.usage,
 			sessionId: this.sessionId,
+			suggestions: suggestions.length ? suggestions : undefined,
 		};
 		return embedClaudeMessageMeta(markdown, meta);
 	}
