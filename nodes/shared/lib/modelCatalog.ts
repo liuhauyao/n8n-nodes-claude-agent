@@ -1,4 +1,5 @@
 import type { ModelEntry, ProviderType } from './types';
+import { DEFAULT_OPENAI_SHIM_BASE_URL } from './types';
 
 /** Last-resort execution default only — never used to populate model dropdowns. */
 const EXECUTION_DEFAULT_MODEL = 'claude-sonnet-4-20250514';
@@ -7,6 +8,7 @@ type ProviderAuth = {
 	apiKey?: string;
 	authToken?: string;
 	baseUrl?: string;
+	shimBaseUrl?: string;
 	defaultModel?: string;
 	customModel?: string;
 };
@@ -33,6 +35,18 @@ function buildAnthropicRequestHeaders(credentials: ProviderAuth): Record<string,
 		);
 	}
 	return headers;
+}
+
+/** OpenAI 兼容上游：Authorization Bearer */
+function buildOpenAiRequestHeaders(credentials: ProviderAuth): Record<string, string> {
+	const token = credentials.authToken?.trim() || credentials.apiKey?.trim();
+	if (!token) {
+		throw new Error('API Key or Auth Token is required for OpenAI compatible upstream');
+	}
+	return {
+		Accept: 'application/json',
+		Authorization: token.startsWith('Bearer ') ? token : `Bearer ${token}`,
+	};
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -148,6 +162,78 @@ async function fetchAnthropicCompatibleModels(credentials: ProviderAuth, baseUrl
 	throw new Error(errors.join(' | '));
 }
 
+async function fetchOpenAiCompatibleModels(credentials: ProviderAuth): Promise<ModelEntry[]> {
+	const baseUrl = credentials.baseUrl?.trim();
+	if (!baseUrl) {
+		throw new Error('Upstream Base URL is required for OpenAI compatible gateway');
+	}
+	const headers = buildOpenAiRequestHeaders(credentials);
+	const root = normalizeBaseUrl(baseUrl);
+	const url = root.endsWith('/v1') ? `${root}/models` : `${root}/v1/models`;
+	try {
+		return await fetchModelsFromUrl(url, headers);
+	} catch (error) {
+		const configured = configuredModelsFromCredential(credentials);
+		if (configured.length > 0) {
+			return configured;
+		}
+		throw error;
+	}
+}
+
+function buildOpenAiShimUpstreamHeaders(credentials: ProviderAuth): Record<string, string> {
+	const upstream = credentials.baseUrl?.trim();
+	const token = credentials.authToken?.trim() || credentials.apiKey?.trim();
+	if (!upstream || !token) {
+		throw new Error('Upstream Base URL and API Key are required for shim verification');
+	}
+	const upstreamAuth = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+	return {
+		Accept: 'application/json',
+		'Content-Type': 'application/json',
+		'X-Claude-Agent-Upstream-Url': upstream.replace(/\/+$/, ''),
+		'X-Claude-Agent-Upstream-Authorization': upstreamAuth,
+	};
+}
+
+/**
+ * 校验本地 anthropic-openai-shim 是否可达且能转发推理。
+ */
+export async function verifyOpenAiCompatibleShimConnection(
+	credentials: ProviderAuth,
+): Promise<void> {
+	const shimBase = credentials.shimBaseUrl?.trim() || DEFAULT_OPENAI_SHIM_BASE_URL;
+	const healthUrl = `${normalizeBaseUrl(shimBase)}/health`;
+	const health = await fetch(healthUrl);
+	if (!health.ok) {
+		throw new Error(
+			`Shim not reachable at ${healthUrl} (${health.status}). Start: node scripts/anthropic-openai-shim.mjs`,
+		);
+	}
+
+	const model =
+		credentials.customModel?.trim()
+		|| credentials.defaultModel?.trim()
+		|| 'agnes-2.0-flash';
+	const url = `${normalizeBaseUrl(shimBase)}/v1/messages`;
+	const response = await fetch(url, {
+		method: 'POST',
+		headers: buildOpenAiShimUpstreamHeaders(credentials),
+		body: JSON.stringify({
+			model,
+			max_tokens: 1,
+			messages: [{ role: 'user', content: 'ping' }],
+		}),
+	});
+	if (response.status === 401 || response.status === 403) {
+		throw new Error(`Upstream rejected API key via shim (${response.status})`);
+	}
+	if (!response.ok) {
+		const detail = await response.text().catch(() => '');
+		throw new Error(`Shim inference failed: ${url} → ${response.status} ${detail.slice(0, 200)}`);
+	}
+}
+
 /**
  * Anthropic gateway connectivity check when GET /v1/models is unavailable.
  * Uses POST /v1/messages (Anthropic Messages API — required by LLM gateway spec).
@@ -203,6 +289,10 @@ export async function listModels(
 			throw new Error('Base URL is required for Anthropic gateway provider');
 		}
 		const models = await fetchAnthropicCompatibleModels(credentials, credentials.baseUrl);
+		return mergeConfiguredModels(models, credentials);
+	}
+	if (providerType === 'openai_compatible_gateway') {
+		const models = await fetchOpenAiCompatibleModels(credentials);
 		return mergeConfiguredModels(models, credentials);
 	}
 	throw new Error(

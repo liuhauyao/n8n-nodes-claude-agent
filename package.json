@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-claude-sdk-agent",
-  "version": "1.3.10",
+  "version": "1.4.0",
   "description": "n8n community nodes — Claude Agent SDK with Model Selector, Provider credentials, streaming, MCP and skills.",
   "keywords": [
     "n8n-community-node-package",
@@ -33,10 +33,12 @@
     "verify": "npm run build && eslint dist && node scripts/lint-package-json.mjs",
     "lint": "eslint dist && node scripts/lint-package-json.mjs",
     "dev": "tsc --watch",
-    "poc": "node scripts/poc-local.mjs"
+    "poc": "node scripts/poc-local.mjs",
+    "shim": "node scripts/anthropic-openai-shim.mjs"
   },
   "files": [
     "dist",
+    "scripts/anthropic-openai-shim.mjs",
     "README.md",
     "LICENSE"
   ],

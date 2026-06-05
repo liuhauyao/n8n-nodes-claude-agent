@@ -7,7 +7,11 @@ import type {
 } from 'n8n-workflow';
 
 import { readProviderCredentials } from './buildSdkEnv';
-import { listModels, verifyAnthropicGatewayConnection } from './modelCatalog';
+import {
+	listModels,
+	verifyAnthropicGatewayConnection,
+	verifyOpenAiCompatibleShimConnection,
+} from './modelCatalog';
 import type { ProviderType } from './types';
 
 const DIRECT_AND_GATEWAY: ProviderType[] = ['anthropic_direct', 'anthropic_gateway'];
@@ -82,6 +86,37 @@ export async function claudeProviderCredentialTest(
 				status: 'Error',
 				message: `Could not load models: ${message}`,
 			};
+		}
+	}
+	if (parsed.providerType === 'openai_compatible_gateway') {
+		if (!parsed.apiKey?.trim() && !parsed.authToken?.trim()) {
+			return {
+				status: 'Error',
+				message: 'API Key or Auth Token is required for OpenAI compatible upstream',
+			};
+		}
+		if (!parsed.baseUrl?.trim()) {
+			return {
+				status: 'Error',
+				message: 'Upstream Base URL is required (e.g. https://apihub.agnes-ai.com/v1)',
+			};
+		}
+		const keyForShape = parsed.apiKey?.trim() || parsed.authToken?.trim() || '';
+		const shapeError = validateApiKeyShape(keyForShape);
+		if (shapeError) {
+			return { status: 'Error', message: shapeError };
+		}
+
+		try {
+			const models = await listModels(parsed.providerType, parsed);
+			await verifyOpenAiCompatibleShimConnection(parsed);
+			return {
+				status: 'OK',
+				message: `Connected. ${models.length} upstream model(s); shim inference OK.`,
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { status: 'Error', message };
 		}
 	}
 	if (!parsed.defaultModel?.trim() && !parsed.customModel?.trim()) {

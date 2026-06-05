@@ -8,7 +8,7 @@ import type {
 
 import { listModels, modelsToOptions } from '../nodes/shared/lib/modelCatalog';
 import { readProviderCredentials } from '../nodes/shared/lib/buildSdkEnv';
-import { PROVIDER_TYPE_OPTIONS } from '../nodes/shared/lib/types';
+import { DEFAULT_OPENAI_SHIM_BASE_URL, PROVIDER_TYPE_OPTIONS } from '../nodes/shared/lib/types';
 
 const DIRECT_AND_GATEWAY: Array<(typeof PROVIDER_TYPE_OPTIONS)[number]['value']> = [
 	'anthropic_direct',
@@ -52,7 +52,7 @@ function providerFields(): INodeProperties[] {
 			description: 'Optional Authorization bearer token (ANTHROPIC_AUTH_TOKEN)',
 			displayOptions: {
 				show: {
-					providerType: ['anthropic_direct', 'anthropic_gateway'],
+					providerType: ['anthropic_direct', 'anthropic_gateway', 'openai_compatible_gateway'],
 				},
 			},
 		},
@@ -67,6 +67,47 @@ function providerFields(): INodeProperties[] {
 			displayOptions: {
 				show: {
 					providerType: ['anthropic_gateway'],
+				},
+			},
+		},
+		{
+			displayName: 'Upstream Base URL',
+			name: 'baseUrl',
+			type: 'string',
+			default: '',
+			placeholder: 'https://apihub.agnes-ai.com/v1',
+			description:
+				'OpenAI-compatible upstream API root. Model list uses GET {baseUrl}/models (Bearer auth).',
+			displayOptions: {
+				show: {
+					providerType: ['openai_compatible_gateway'],
+				},
+			},
+		},
+		{
+			displayName: 'Shim Base URL',
+			name: 'shimBaseUrl',
+			type: 'string',
+			default: DEFAULT_OPENAI_SHIM_BASE_URL,
+			placeholder: DEFAULT_OPENAI_SHIM_BASE_URL,
+			description:
+				'Local anthropic-openai-shim listen URL. SDK talks Anthropic API here; shim forwards to upstream.',
+			displayOptions: {
+				show: {
+					providerType: ['openai_compatible_gateway'],
+				},
+			},
+		},
+		{
+			displayName: 'API Key',
+			name: 'apiKey',
+			type: 'string',
+			typeOptions: { password: true },
+			default: '',
+			description: 'Upstream API key (sent as Authorization Bearer to OpenAI-compatible API)',
+			displayOptions: {
+				show: {
+					providerType: ['openai_compatible_gateway'],
 				},
 			},
 		},

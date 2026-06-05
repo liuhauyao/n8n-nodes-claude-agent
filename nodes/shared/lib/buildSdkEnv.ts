@@ -1,4 +1,5 @@
 import type { ClaudeProviderCredentials, ClaudeModelConfig } from './types';
+import { DEFAULT_OPENAI_SHIM_BASE_URL } from './types';
 import { resolveModelId } from './modelCatalog';
 
 function setEnv(target: Record<string, string>, key: string, value: string | undefined): void {
@@ -31,6 +32,30 @@ export function buildSdkEnv(
 				sdkEnv.ENABLE_TOOL_SEARCH = 'true';
 			}
 			break;
+		case 'openai_compatible_gateway': {
+			const upstream = credentials.baseUrl?.trim();
+			const upstreamKey = credentials.authToken?.trim() || credentials.apiKey?.trim();
+			if (!upstream) {
+				throw new Error('Upstream Base URL is required for OpenAI compatible gateway');
+			}
+			if (!upstreamKey) {
+				throw new Error('API Key or Auth Token is required for OpenAI compatible upstream');
+			}
+			const shimBase = credentials.shimBaseUrl?.trim() || DEFAULT_OPENAI_SHIM_BASE_URL;
+			const upstreamAuth = upstreamKey.startsWith('Bearer ') ? upstreamKey : `Bearer ${upstreamKey}`;
+			setEnv(sdkEnv, 'ANTHROPIC_BASE_URL', shimBase);
+			setEnv(sdkEnv, 'ANTHROPIC_AUTH_TOKEN', 'shim-local');
+			setEnv(sdkEnv, 'ANTHROPIC_MODEL', model);
+			setEnv(
+				sdkEnv,
+				'ANTHROPIC_CUSTOM_HEADERS',
+				JSON.stringify({
+					'X-Claude-Agent-Upstream-Url': upstream.replace(/\/+$/, ''),
+					'X-Claude-Agent-Upstream-Authorization': upstreamAuth,
+				}),
+			);
+			break;
+		}
 		case 'bedrock':
 			sdkEnv.CLAUDE_CODE_USE_BEDROCK = '1';
 			setEnv(sdkEnv, 'AWS_REGION', credentials.region);
@@ -96,6 +121,7 @@ export function readProviderCredentials(raw: Record<string, unknown>): ClaudePro
 		apiKey: raw.apiKey ? String(raw.apiKey) : undefined,
 		authToken: raw.authToken ? String(raw.authToken) : undefined,
 		baseUrl: raw.baseUrl ? String(raw.baseUrl) : undefined,
+		shimBaseUrl: raw.shimBaseUrl ? String(raw.shimBaseUrl) : undefined,
 		enableToolSearch: Boolean(raw.enableToolSearch),
 		region: raw.region ? String(raw.region) : undefined,
 		accessKeyId: raw.accessKeyId ? String(raw.accessKeyId) : undefined,

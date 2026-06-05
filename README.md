@@ -77,10 +77,48 @@ Response / SSE
 Single credential type with **Provider Type** switching:
 
 - **Anthropic Direct** — `ANTHROPIC_API_KEY`, dynamic `/v1/models`
-- **Anthropic Gateway** — `ANTHROPIC_BASE_URL` + key (LiteLLM / compatible proxy)
+- **Anthropic Gateway** — `ANTHROPIC_BASE_URL` + key (LiteLLM / Anthropic-compatible proxy)
+- **OpenAI Compatible Gateway** — Agnes 等仅 OpenAI Chat Completions 的上游；内置 `anthropic-openai-shim` 做协议转换（无需 LiteLLM）
 - **Bedrock / Vertex / Foundry / AWS Platform** — env vars per [Claude Code docs](https://code.claude.com/docs/en/env-vars)
 
 Use **Custom Model ID** when the gateway does not expose `/v1/models`.
+
+### OpenAI Compatible Gateway（Agnes 等）
+
+Claude Agent SDK 只发 Anthropic `/v1/messages`；Agnes（`https://apihub.agnes-ai.com/v1`）只认 OpenAI `/v1/chat/completions`。本包自带轻量 shim，无需部署 LiteLLM。
+
+**1. 在 n8n 同机启动 shim（仅需一次，建议 pm2）：**
+
+```bash
+# 包安装于 ~/.n8n/nodes/node_modules/n8n-nodes-claude-sdk-agent 后：
+node ~/.n8n/nodes/node_modules/n8n-nodes-claude-sdk-agent/scripts/anthropic-openai-shim.mjs
+
+# 或开发目录：npm run shim
+# 默认监听 http://127.0.0.1:18789
+```
+
+pm2 示例：
+
+```javascript
+{
+  name: 'claude-anthropic-openai-shim',
+  script: 'scripts/anthropic-openai-shim.mjs',
+  cwd: '/home/mtdev/.n8n/nodes/node_modules/n8n-nodes-claude-sdk-agent',
+  env: { CLAUDE_AGENT_SHIM_HOST: '127.0.0.1', CLAUDE_AGENT_SHIM_PORT: '18789' }
+}
+```
+
+**2. n8n Claude Provider 凭据：**
+
+| 字段 | 示例 |
+|------|------|
+| Provider Type | **OpenAI Compatible Gateway (Agnes / etc.)** |
+| Upstream Base URL | `https://apihub.agnes-ai.com/v1` |
+| Shim Base URL | `http://127.0.0.1:18789`（默认） |
+| API Key 或 Auth Token | Agnes Platform API Key（Bearer） |
+| Default / Custom Model | `agnes-2.0-flash` |
+
+凭据测试会：① 直连上游 `GET /models`；② 经 shim 跑 `POST /v1/messages` 探活。两项均通过才算可用。
 
 ---
 
