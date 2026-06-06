@@ -46,13 +46,14 @@ export function buildSdkEnv(
 			setEnv(sdkEnv, 'ANTHROPIC_BASE_URL', shimBase);
 			setEnv(sdkEnv, 'ANTHROPIC_AUTH_TOKEN', 'shim-local');
 			setEnv(sdkEnv, 'ANTHROPIC_MODEL', model);
+			// Claude SDK expects "Name: Value" lines, not JSON (see ANTHROPIC_CUSTOM_HEADERS env docs)
 			setEnv(
 				sdkEnv,
 				'ANTHROPIC_CUSTOM_HEADERS',
-				JSON.stringify({
-					'X-Claude-Agent-Upstream-Url': upstream.replace(/\/+$/, ''),
-					'X-Claude-Agent-Upstream-Authorization': upstreamAuth,
-				}),
+				[
+					`X-Claude-Agent-Upstream-Url: ${upstream.replace(/\/+$/, '')}`,
+					`X-Claude-Agent-Upstream-Authorization: ${upstreamAuth}`,
+				].join('\n'),
 			);
 			break;
 		}
