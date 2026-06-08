@@ -75,7 +75,7 @@ function providerFields(): INodeProperties[] {
 			name: 'baseUrl',
 			type: 'string',
 			default: '',
-			placeholder: 'https://apihub.agnes-ai.com/v1',
+			placeholder: 'https://your-openai-gateway.example.com/v1',
 			description:
 				'OpenAI-compatible upstream API root. Model list uses GET {baseUrl}/models (Bearer auth).',
 			displayOptions: {

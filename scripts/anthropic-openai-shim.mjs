@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Anthropic Messages API → OpenAI Chat Completions 轻量桥接。
- * 供 Claude Agent SDK 对接 Agnes 等仅 OpenAI 兼容的上游。
+ * 供 Claude Agent SDK 对接仅 OpenAI Chat Completions 兼容的上游网关。
  *
  * 上游地址与 Key 由请求头传入（与 n8n Claude Provider openai_compatible_gateway 凭据配合）：
  *   X-Claude-Agent-Upstream-Url

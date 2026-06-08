@@ -51,22 +51,27 @@ type PermissionPresetConfig = {
 	disallowedTools?: string[];
 	permissionMode?: string;
 	allowDangerouslySkipPermissions?: boolean;
-	tools?: { type: 'preset'; preset: 'claude_code' } | readonly [];
+	tools?: { type: 'preset'; preset: 'claude_code' } | readonly string[];
 	defaultStrictMcpConfig?: boolean;
+};
+
+/** 代码只读模式：注册 claude_code 工具集，再靠 allowed/disallowed 收窄到 Read/Grep/Glob */
+const CODEBASE_READ_TOOLS = {
+	tools: { type: 'preset', preset: 'claude_code' } as const,
+	allowedTools: ['Read', 'Grep', 'Glob'],
+	disallowedTools: [
+		'Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
+	],
+	permissionMode: 'bypassPermissions',
+	allowDangerouslySkipPermissions: true,
 };
 
 const PERMISSION_PRESETS: Record<string, PermissionPresetConfig> = {
 	customer_service: {
-		allowedTools: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
-		disallowedTools: ['Bash', 'Write', 'Edit'],
-		permissionMode: 'bypassPermissions',
-		allowDangerouslySkipPermissions: true,
+		...CODEBASE_READ_TOOLS,
 	},
 	read_only: {
-		allowedTools: ['Read', 'Grep', 'Glob'],
-		disallowedTools: ['Bash', 'Write', 'Edit'],
-		permissionMode: 'bypassPermissions',
-		allowDangerouslySkipPermissions: true,
+		...CODEBASE_READ_TOOLS,
 	},
 	mcp_skills_only: {
 		// 保留 claude_code 工具注册，便于流式输出 tool_start/tool_end；执行由 disallowedTools + dontAsk 拦截
@@ -309,9 +314,10 @@ export class ClaudeAgent implements INodeType {
 				const preset = PERMISSION_PRESETS[presetKey];
 				const strictMcpConfig = params.strictMcpConfig || preset.defaultStrictMcpConfig === true;
 
-				const prompt = resumeSession
-					? params.chatInput.trim()
-					: [params.systemMessage?.trim(), params.chatInput.trim()].filter(Boolean).join('\n\n---\n\n');
+				const systemMessage = params.systemMessage?.trim() ?? '';
+				const userMessage = params.chatInput.trim();
+				// 用户消息单独作为 prompt；systemMessage 仅写入 systemPrompt（首条与续聊均如此）
+				const prompt = userMessage;
 
 				const assembler = new ClaudeStreamAssembler({
 					onBegin: async () => {
@@ -360,19 +366,18 @@ export class ClaudeAgent implements INodeType {
 					...(preset.tools !== undefined
 						? {
 							tools: Array.isArray(preset.tools)
-								? []
+								? [...preset.tools]
 								: preset.tools,
 						}
 						: {}),
 				};
 
 				if (params.useClaudeCodePreset) {
-					const append = params.systemMessage?.trim();
-					queryOptions.systemPrompt = append
-						? { type: 'preset', preset: 'claude_code', append }
+					queryOptions.systemPrompt = systemMessage
+						? { type: 'preset', preset: 'claude_code', append: systemMessage }
 						: { type: 'preset', preset: 'claude_code' };
-				} else if (params.systemMessage?.trim() && !resumeSession) {
-					queryOptions.systemPrompt = params.systemMessage.trim();
+				} else if (systemMessage) {
+					queryOptions.systemPrompt = systemMessage;
 				}
 
 				let lastError: string | undefined;

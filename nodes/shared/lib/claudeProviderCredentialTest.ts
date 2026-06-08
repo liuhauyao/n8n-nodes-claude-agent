@@ -98,7 +98,7 @@ export async function claudeProviderCredentialTest(
 		if (!parsed.baseUrl?.trim()) {
 			return {
 				status: 'Error',
-				message: 'Upstream Base URL is required (e.g. https://apihub.agnes-ai.com/v1)',
+				message: 'Upstream Base URL is required (e.g. https://your-openai-gateway.example.com/v1)',
 			};
 		}
 		const keyForShape = parsed.apiKey?.trim() || parsed.authToken?.trim() || '';

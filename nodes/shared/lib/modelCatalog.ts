@@ -214,7 +214,7 @@ export async function verifyOpenAiCompatibleShimConnection(
 	const model =
 		credentials.customModel?.trim()
 		|| credentials.defaultModel?.trim()
-		|| 'agnes-2.0-flash';
+		|| 'gpt-4o-mini';
 	const url = `${normalizeBaseUrl(shimBase)}/v1/messages`;
 	const response = await fetch(url, {
 		method: 'POST',

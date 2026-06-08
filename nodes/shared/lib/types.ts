@@ -65,7 +65,7 @@ export const PROVIDER_TYPE_OPTIONS: Array<{ name: string; value: ProviderType; d
 		description: 'ANTHROPIC_BASE_URL + API key',
 	},
 	{
-		name: 'OpenAI Compatible Gateway (Agnes / etc.)',
+		name: 'OpenAI Compatible Gateway',
 		value: 'openai_compatible_gateway',
 		description:
 			'Upstream OpenAI Chat Completions + local anthropic-openai-shim (no LiteLLM)',

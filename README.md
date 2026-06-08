@@ -62,7 +62,7 @@ Claude Agent            ← modelConfigSource: From Previous Node
 Response / SSE
 ```
 
-### Model Selector rules (Matrees example)
+### Model Selector rules (example)
 
 | Rule | Condition | Profile |
 |------|-----------|---------|
@@ -78,47 +78,47 @@ Single credential type with **Provider Type** switching:
 
 - **Anthropic Direct** — `ANTHROPIC_API_KEY`, dynamic `/v1/models`
 - **Anthropic Gateway** — `ANTHROPIC_BASE_URL` + key (LiteLLM / Anthropic-compatible proxy)
-- **OpenAI Compatible Gateway** — Agnes 等仅 OpenAI Chat Completions 的上游；内置 `anthropic-openai-shim` 做协议转换（无需 LiteLLM）
+- **OpenAI Compatible Gateway** — Upstream with only OpenAI Chat Completions; built-in `anthropic-openai-shim` handles protocol translation (no LiteLLM required)
 - **Bedrock / Vertex / Foundry / AWS Platform** — env vars per [Claude Code docs](https://code.claude.com/docs/en/env-vars)
 
 Use **Custom Model ID** when the gateway does not expose `/v1/models`.
 
-### OpenAI Compatible Gateway（Agnes 等）
+### OpenAI Compatible Gateway
 
-Claude Agent SDK 只发 Anthropic `/v1/messages`；Agnes（`https://apihub.agnes-ai.com/v1`）只认 OpenAI `/v1/chat/completions`。本包自带轻量 shim，无需部署 LiteLLM。
+Claude Agent SDK sends Anthropic `/v1/messages`; many self-hosted or third-party gateways only accept OpenAI `/v1/chat/completions`. This package includes a lightweight shim — no LiteLLM needed.
 
-**1. 在 n8n 同机启动 shim（仅需一次，建议 pm2）：**
+**1. Start the shim on the same host as n8n (one-time setup, recommend pm2):**
 
 ```bash
-# 包安装于 ~/.n8n/nodes/node_modules/n8n-nodes-claude-sdk-agent 后：
+# After installing the package under ~/.n8n/nodes:
 node ~/.n8n/nodes/node_modules/n8n-nodes-claude-sdk-agent/scripts/anthropic-openai-shim.mjs
 
-# 或开发目录：npm run shim
-# 默认监听 http://127.0.0.1:18789
+# Or from the dev directory: npm run shim
+# Default: http://127.0.0.1:18789
 ```
 
-pm2 示例：
+pm2 example:
 
 ```javascript
 {
   name: 'claude-anthropic-openai-shim',
   script: 'scripts/anthropic-openai-shim.mjs',
-  cwd: '/home/mtdev/.n8n/nodes/node_modules/n8n-nodes-claude-sdk-agent',
+  cwd: '/home/<user>/.n8n/nodes/node_modules/n8n-nodes-claude-sdk-agent',
   env: { CLAUDE_AGENT_SHIM_HOST: '127.0.0.1', CLAUDE_AGENT_SHIM_PORT: '18789' }
 }
 ```
 
-**2. n8n Claude Provider 凭据：**
+**2. Configure the Claude Provider credential:**
 
-| 字段 | 示例 |
-|------|------|
-| Provider Type | **OpenAI Compatible Gateway (Agnes / etc.)** |
-| Upstream Base URL | `https://apihub.agnes-ai.com/v1` |
-| Shim Base URL | `http://127.0.0.1:18789`（默认） |
-| API Key 或 Auth Token | Agnes Platform API Key（Bearer） |
-| Default / Custom Model | `agnes-2.0-flash` |
+| Field | Example |
+|-------|---------|
+| Provider Type | **OpenAI Compatible Gateway** |
+| Upstream Base URL | `https://your-openai-gateway.example.com/v1` |
+| Shim Base URL | `http://127.0.0.1:18789` (default) |
+| API Key or Auth Token | Your upstream API key (Bearer) |
+| Default / Custom Model | The model ID your gateway exposes |
 
-凭据测试会：① 直连上游 `GET /models`；② 经 shim 跑 `POST /v1/messages` 探活。两项均通过才算可用。
+Credential test: ① probes upstream `GET /models`; ② sends a test message via shim `POST /v1/messages`. Both must pass.
 
 ---
 
@@ -127,56 +127,57 @@ pm2 示例：
 | Parameter | Description |
 |-----------|-------------|
 | Model Config Source | `fromSelector` / `fromCredential` / `fromInput` |
-| Permission Preset | Description |
-|-------------------|-------------|
-| **`mcp_skills_only`** | **灵感助手推荐。** 内置工具经 `disallowedTools` + `dontAsk` **拒绝执行**；MCP 在 Deny/No Filter 下自动写入 `allowedTools: mcp__{server}__*`（`dontAsk` 须预批准，否则 MCP 会被免询问拒绝）。自动 `strictMcpConfig`。 |
-| **`plan_only`** | **平台客服推荐。** 全部内置工具拒绝执行（`dontAsk`），流式 UI 仍可见被拒绝的调用；工作流侧不配 MCP。 |
-| `customer_service` | Legacy: Read/Grep/Glob/Web + MCP; still allows local file reads. |
-| `read_only` | Legacy: Read/Grep/Glob + MCP. |
-| `full_agent` | Full Claude Code tools (`world_assistant` legacy alias → `full_agent`). |
+
+### Permission presets
+
+| Preset | Description |
+|--------|-------------|
+| **`mcp_skills_only`** | Built-in tools denied via `disallowedTools` + `dontAsk`. MCP tools auto-approved with `allowedTools: mcp__{server}__*` when using Deny/No Filter mode. Requires `strictMcpConfig`. Use for workflows that rely on MCP and skills only, with no local code access. |
+| **`plan_only`** | All built-in tools denied (`dontAsk`); streaming UI still shows rejected calls. No MCP on the workflow side. Use for pure text-planning agents. |
+| `customer_service` | **Read/Grep/Glob + Skills** — registers `claude_code` toolset, blocks Write/Bash/Web. Use for Q&A agents that need to analyze a local codebase alongside skills. |
+| `read_only` | Alias for `customer_service`. |
+| `full_agent` | Full Claude Code tools (`world_assistant` legacy alias → `full_agent`). Use only in trusted, sandboxed environments. |
 
 ### Permission preset matrix
 
-| Preset | Built-in tools | MCP | Skills | UI 展示 tool 调用 |
-|--------|----------------|-----|--------|-------------------|
-| `mcp_skills_only` | 拒绝执行 | 是 | 是 | 是（含 MCP 与被拒内置工具） |
-| `plan_only` | 拒绝执行 | 否（工作流不配） | 是 | 是（仅被拒调用） |
-| `customer_service` | Read/Grep/… | Yes | Yes | Legacy |
-| `read_only` | Read/Grep/Glob | Yes | Yes | Legacy |
-| `full_agent` | All | Yes | Yes | Internal dev |
+| Preset | Built-in tools | MCP | Skills | Streaming tool events |
+|--------|----------------|-----|--------|-----------------------|
+| `mcp_skills_only` | Denied | Yes | Yes | Yes (MCP + denied built-ins) |
+| `plan_only` | Denied | No (workflow side) | Yes | Yes (denied calls only) |
+| `customer_service` | Read/Grep/Glob | Optional | Yes | Yes |
+| `read_only` | Read/Grep/Glob | Optional | Yes | Yes |
+| `full_agent` | All | Yes | Yes | Yes |
 
-**Workspace guidance:** For `mcp_skills_only` / `plan_only`, set **Skills Root** to the skills directory only; do **not** mount source repos (`matrees-backend`, etc.) in Working Directories.
+**Workspace guidance:** For `mcp_skills_only` / `plan_only`, set **Skills Root** to the skills directory only; do **not** mount source code repositories in Working Directories — these presets block file-read tools.
 
 ### MCP Tool Filter (Options → MCP)
 
 | Filter Mode | Behavior |
 |-------------|----------|
 | **No Filter** (default) | All tools from MCP `tools/list` remain available. |
-| **Deny List** | Deny listed bare tool names on every configured MCP server (Claude: `disallowedTools` as `mcp__{server}__{tool}`). With `mcp_skills_only`, also pre-approves `mcp__{server}__*` (aligned with Cursor `Mcp(server:*)`). |
+| **Deny List** | Deny listed bare tool names on every configured MCP server (Claude: `disallowedTools` as `mcp__{server}__{tool}`). With `mcp_skills_only`, also pre-approves `mcp__{server}__*`. |
 | **Allow List** | Allow listed tools only (no server wildcard); optionally fill **Tool Catalog** to deny everything else. |
 
-**Claude vs Cursor（MCP 权限）**
+**Claude vs Cursor (MCP permissions)**
 
-| 环节 | Cursor Agent | Claude Agent (`mcp_skills_only`) |
-|------|----------------|----------------------------------|
-| 本地 Read/Shell | `.cursor/cli.json` deny | `disallowedTools` + `dontAsk` |
-| MCP 默认可用 | Deny 模式下 `cli.json` 写入 `Mcp(server:*)` | ≥1.3.9：`allowedTools` 写入 `mcp__server__*` |
-| 未预批准时 | CLI 拒绝 | `dontAsk` → 免询问拒绝（表现为「调用不了 MCP」） |
+| Step | Cursor Agent | Claude Agent (`mcp_skills_only`) |
+|------|--------------|----------------------------------|
+| Local Read/Shell | `.cursor/cli.json` deny | `disallowedTools` + `dontAsk` |
+| MCP default approval | Deny mode writes `Mcp(server:*)` to `cli.json` | ≥1.3.9: writes `mcp__server__*` to `allowedTools` |
+| Without pre-approval | CLI rejects | `dontAsk` → silently rejected (appears as "MCP unavailable") |
 
-官方：[MCP permissions](https://code.claude.com/docs/en/agent-sdk/mcp) — MCP 须 `allowedTools`；`acceptEdits` **不会**自动批准 MCP。
+Official: [MCP permissions](https://code.claude.com/docs/en/agent-sdk/mcp) — MCP requires `allowedTools`; `acceptEdits` does **not** auto-approve MCP.
 
-Streaming uses `__claude__` JSON chunks (aligned with Matrees `useClaudeStreamParser`).
+Streaming output uses `__claude__` JSON chunks.
 
-### 输出字段
+### Output fields
 
-| 字段 | 说明 |
-|------|------|
-| `output` | 完整落库正文：Markdown（含 Agent 原文中的 `<next>`）+ `<claude_meta>`（toolCalls / timeline / suggestions） |
-| `textOutput` | 纯 Markdown 正文（无 `<next>`、无 `<claude_meta>`，供生图等下游直接使用） |
-| `claudeSessionId` | Claude SDK 会话 id |
-| `usage` / `costUsd` | Token 与费用（若有） |
-
-与 Cursor Agent 节点语义一致：灵感助手工作流落库用 `output`；生图「处理提示词」优先读 `textOutput`。
+| Field | Description |
+|-------|-------------|
+| `output` | Full response body: Markdown (including `<next>` blocks) + `<claude_meta>` (toolCalls / timeline / suggestions) |
+| `textOutput` | Plain Markdown only (no `<next>`, no `<claude_meta>`); suitable for passing directly to downstream nodes |
+| `claudeSessionId` | Claude SDK session id |
+| `usage` / `costUsd` | Token counts and cost (when available) |
 
 ---
 
@@ -194,7 +195,7 @@ ANTHROPIC_API_KEY=... POC_CWD=/path/to/project npm run poc
 - API keys live only in **Claude Provider** credentials.
 - `claudeModelConfig.sdkEnv` contains secrets during execution — do not log full items in production.
 - Use **`mcp_skills_only`** for production AI workflows that must not read or modify local code; use **`plan_only`** when MCP should also be disabled.
-- Legacy `customer_service` preset still allows Read/Grep against the workspace — prefer `mcp_skills_only` or `plan_only`.
+- `customer_service` / `read_only` allow Read/Grep/Glob against mounted Working Directories — only mount directories the agent is authorized to access.
 
 ---
 
