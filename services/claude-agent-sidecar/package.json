@@ -1,7 +1,7 @@
 {
   "name": "claude-agent-sidecar",
   "private": true,
-  "version": "1.6.4",
+  "version": "1.7.0",
   "description": "Long-lived Claude Agent SDK sidecar for n8n-nodes-claude-sdk-agent",
   "main": "dist/index.js",
   "scripts": {

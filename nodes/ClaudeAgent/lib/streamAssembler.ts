@@ -28,6 +28,9 @@ export class ClaudeStreamAssembler {
 	private sessionId?: string;
 	private usage?: ClaudeMessageMeta['usage'];
 	private fallbackMarkdown = '';
+	private structuredOutput?: unknown;
+	private sdkSuggestions: string[] = [];
+	private refusalMessage?: string;
 
 	constructor(private readonly sink: StreamSink) {}
 
@@ -106,6 +109,18 @@ export class ClaudeStreamAssembler {
 		return this.usage;
 	}
 
+	getStructuredOutput(): unknown {
+		return this.structuredOutput;
+	}
+
+	getSdkSuggestions(): string[] {
+		return this.sdkSuggestions;
+	}
+
+	getRefusalMessage(): string | undefined {
+		return this.refusalMessage;
+	}
+
 	async consume(message: unknown): Promise<void> {
 		if (!message || typeof message !== 'object') return;
 		const record = message as Record<string, unknown>;
@@ -121,8 +136,30 @@ export class ClaudeStreamAssembler {
 			return;
 		}
 
+		if (type === 'system') {
+			await this.consumeSystemMessage(record);
+			return;
+		}
+
 		if (type === 'result') {
 			await this.consumeResultMessage(record);
+		}
+	}
+
+	private async consumeSystemMessage(record: Record<string, unknown>): Promise<void> {
+		const subtype = String(record.subtype ?? '');
+		if (subtype === 'model_fallback') {
+			const trigger = typeof record.message === 'string'
+				? record.message
+				: typeof record.model === 'string'
+					? record.model
+					: undefined;
+			await this.emit({ kind: 'model_switch', trigger });
+			await this.emit({
+				kind: 'status',
+				phase: 'model_fallback',
+				message: trigger ?? 'Model switched due to availability',
+			});
 		}
 	}
 
@@ -245,6 +282,29 @@ export class ClaudeStreamAssembler {
 		}
 		if (typeof record.result === 'string' && record.result.trim()) {
 			this.fallbackMarkdown = record.result.trim();
+		}
+
+		const structured = record.structured_output ?? record.structuredOutput;
+		if (structured !== undefined && structured !== null) {
+			this.structuredOutput = structured;
+			await this.emit({ kind: 'structured', data: structured });
+		}
+
+		const rawSuggestions = record.prompt_suggestions ?? record.promptSuggestions;
+		if (Array.isArray(rawSuggestions)) {
+			const items = rawSuggestions
+				.map((item) => (typeof item === 'string' ? item : String(item ?? '')).trim())
+				.filter(Boolean);
+			if (items.length) {
+				this.sdkSuggestions = items;
+				await this.emit({ kind: 'suggestions', items });
+			}
+		}
+
+		if (record.stop_reason === 'refusal') {
+			this.refusalMessage = String(record.result ?? 'Claude refused the request');
+			await this.emit({ kind: 'refusal', message: this.refusalMessage });
+			await this.emit({ kind: 'status', phase: 'refusal', message: this.refusalMessage });
 		}
 		const usage = record.usage as Record<string, unknown> | undefined;
 		if (usage) {

@@ -7,6 +7,8 @@ import { readRedisCredentials, type RedisCredentials } from './sessionStore';
 
 type SettingSource = 'user' | 'project' | 'local' | 'team' | 'plugins';
 
+export type ToolSearchMode = 'unset' | 'true' | 'auto' | 'false' | string;
+
 export interface ClaudeAgentRunParams {
 	systemMessage: string;
 	chatInput: string;
@@ -27,6 +29,17 @@ export interface ClaudeAgentRunParams {
 	mcpServersJson: string;
 	mcpToolAccess: McpToolAccessConfig;
 	hasWorkspaceConfig: boolean;
+	thinkingEnabled: boolean;
+	maxThinkingTokens: number;
+	maxBudgetUsd: number;
+	forwardSubagentText: boolean;
+	outputFormatSchema: string;
+	outputFormatName: string;
+	toolSearchMode: ToolSearchMode;
+	hooksJson: string;
+	subagentsEnabled: boolean;
+	subagentsJson: string;
+	primaryAgentJson: string;
 }
 
 function readSettingSources(raw: string | string[] | undefined): SettingSource[] {
@@ -61,6 +74,9 @@ export function readClaudeAgentRunParams(
 	const workspace = (options.workspace ?? {}) as IDataObject;
 	const agentBehavior = (options.agentBehavior ?? {}) as IDataObject;
 	const mcp = (options.mcp ?? {}) as IDataObject;
+	const outputOpts = (options.output ?? {}) as IDataObject;
+	const hooksOpts = (options.hooks ?? {}) as IDataObject;
+	const subagentsOpts = (options.subagents ?? {}) as IDataObject;
 
 	const legacyAdditional = ctx.getNodeParameter('additionalOptions', itemIndex, {}) as IDataObject;
 	const legacyMcpForm = (legacyAdditional.mcpServers ?? {}) as McpServersFormValue;
@@ -145,6 +161,19 @@ export function readClaudeAgentRunParams(
 		|| (typeof settingSourcesRaw === 'string' && settingSourcesRaw.trim()),
 	);
 
+	const thinkingEnabled = agentBehavior.thinkingEnabled === true;
+	const maxThinkingTokens = Number(agentBehavior.maxThinkingTokens ?? 10000);
+	const maxBudgetUsd = Number(agentBehavior.maxBudgetUsd ?? 0);
+	const forwardSubagentText = agentBehavior.forwardSubagentText === true;
+	const outputFormatSchema = pickString(outputOpts.outputFormatSchema);
+	const outputFormatName = pickString(outputOpts.outputFormatName) || 'output';
+	const toolSearchModeRaw = pickString(outputOpts.toolSearchMode) || 'unset';
+	const toolSearchMode: ToolSearchMode = toolSearchModeRaw as ToolSearchMode;
+	const hooksJson = pickString(hooksOpts.hooksJson);
+	const subagentsEnabled = subagentsOpts.subagentsEnabled === true;
+	const subagentsJson = pickString(subagentsOpts.subagentsJson);
+	const primaryAgentJson = pickString(subagentsOpts.primaryAgentJson);
+
 	return {
 		systemMessage: pickString(ctx.getNodeParameter('systemMessage', itemIndex, '')),
 		chatInput: pickString(ctx.getNodeParameter('chatInput', itemIndex, '')),
@@ -165,6 +194,17 @@ export function readClaudeAgentRunParams(
 		mcpServersJson,
 		mcpToolAccess,
 		hasWorkspaceConfig,
+		thinkingEnabled,
+		maxThinkingTokens,
+		maxBudgetUsd,
+		forwardSubagentText,
+		outputFormatSchema,
+		outputFormatName,
+		toolSearchMode,
+		hooksJson,
+		subagentsEnabled,
+		subagentsJson,
+		primaryAgentJson,
 	};
 }
 

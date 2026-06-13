@@ -2,7 +2,10 @@ import type { Query } from '@anthropic-ai/claude-agent-sdk';
 
 import type { ClaudeModelConfig, StoredSessionRecord } from '../../../dist/nodes/shared/lib/types';
 import { modelConfigSummary } from '../../../dist/nodes/shared/lib/resolveModelConfig';
-import { buildQueryOptions } from '../../../dist/nodes/ClaudeAgent/lib/buildQueryOptions';
+import { buildQueryOptions, getHookRuntimeState } from '../../../dist/nodes/ClaudeAgent/lib/buildQueryOptions';
+import type { HookRuntimeState } from '../../../dist/nodes/ClaudeAgent/lib/buildDeclarativeHooks';
+import { pickExtendedQueryFields } from '../../../dist/nodes/ClaudeAgent/lib/extendedQueryFields';
+import { sanitizeQueryOptionsForSdk } from '../../../dist/nodes/ClaudeAgent/lib/queryOptionsSanitize';
 import { loadClaudeSdk } from '../../../dist/nodes/ClaudeAgent/lib/loadClaudeSdk';
 import { runStatelessTurn, toStoredRecord } from '../../../dist/nodes/ClaudeAgent/lib/runStatelessTurn';
 import {
@@ -41,6 +44,7 @@ class LiveSession {
 	lastActiveAt = Date.now();
 	currentSink?: SidecarStreamSink;
 	consumerStarted = false;
+	hookRuntimeState?: HookRuntimeState;
 	private turnWaiter?: TurnWaiter;
 	private closed = false;
 
@@ -291,6 +295,7 @@ export class SessionManager {
 			strictMcpConfig: req.params.strictMcpConfig,
 			skills: req.params.skills,
 			maxTurns: req.params.maxTurns,
+			...pickExtendedQueryFields(req.params),
 		});
 
 		if (turn.lastError) {
@@ -344,11 +349,13 @@ export class SessionManager {
 			strictMcpConfig: req.params.strictMcpConfig,
 			skills: req.params.skills,
 			maxTurns: req.params.maxTurns,
+			...pickExtendedQueryFields(req.params),
 		});
 
+		live.hookRuntimeState = getHookRuntimeState(queryOptions);
 		live.query = queryFn({
 			prompt: live.inputQueue,
-			options: queryOptions,
+			options: sanitizeQueryOptionsForSdk(queryOptions),
 		}) as Query;
 
 		void this.runLiveConsumer(live);
@@ -369,15 +376,21 @@ export class SessionManager {
 				if (typeof record.session_id === 'string' && record.session_id) {
 					live.claudeSessionId = record.session_id;
 				}
-				if (record.type === 'result') {
-					if (record.subtype === 'error') {
-						const err = String(record.result ?? 'Claude agent run failed');
-						live.completeTurn(err);
-						await sink?.fail(err);
-					} else {
-						live.completeTurn();
-					}
+			if (record.type === 'result') {
+				// 每轮结束后重置 hook 计数器，避免跨轮次累加
+				if (live.hookRuntimeState) {
+					live.hookRuntimeState.toolCallCount = 0;
+					live.hookRuntimeState.perToolCounts = new Map();
+					live.hookRuntimeState.postToolLogs = [];
 				}
+				if (record.subtype === 'error') {
+					const err = String(record.result ?? 'Claude agent run failed');
+					live.completeTurn(err);
+					await sink?.fail(err);
+				} else {
+					live.completeTurn();
+				}
+			}
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

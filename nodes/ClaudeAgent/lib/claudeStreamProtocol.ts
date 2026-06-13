@@ -9,7 +9,11 @@ export type ClaudeStreamPayload =
 	| { kind: 'thinking_end'; durationMs?: number }
 	| { kind: 'text'; text: string }
 	| { kind: 'status'; phase: string; message?: string }
-	| { kind: 'session'; sessionId: string };
+	| { kind: 'session'; sessionId: string }
+	| { kind: 'structured'; data: unknown }
+	| { kind: 'suggestions'; items: string[] }
+	| { kind: 'model_switch'; trigger?: string }
+	| { kind: 'refusal'; message?: string };
 
 export function encodeClaudeStreamPayload(payload: ClaudeStreamPayload): string {
 	return JSON.stringify({ [CLAUDE_STREAM_MARKER]: payload });
@@ -18,6 +22,10 @@ export function encodeClaudeStreamPayload(payload: ClaudeStreamPayload): string 
 const HIDDEN_TOOL_NAMES = new Set([
 	'AskUserQuestion',
 	'TodoWrite',
+	'TaskCreate',
+	'TaskUpdate',
+	'TaskGet',
+	'TaskList',
 ]);
 
 export function shouldShowToolInUi(rawName: string): boolean {

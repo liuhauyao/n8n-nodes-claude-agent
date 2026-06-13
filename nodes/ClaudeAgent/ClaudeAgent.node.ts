@@ -41,6 +41,7 @@ import {
 	type SidecarMessageRequest,
 } from './lib/sidecarClient';
 import { resolvePermissionPreset } from './lib/permissionPresets';
+import { pickExtendedQueryFields } from './lib/extendedQueryFields';
 import {
 	hasUserTurnContent,
 	normalizeImageUrls,
@@ -266,17 +267,24 @@ export class ClaudeAgent implements INodeType {
 					strictMcpConfig: params.strictMcpConfig,
 					skills: params.skills,
 					maxTurns: params.maxTurns,
+					...pickExtendedQueryFields(params),
 				};
 
 				let sessionRuntime: SessionRuntimeMode | 'stateless-fallback' = params.sessionRuntime;
+				if (params.sessionRuntime === 'sidecar' && !params.sessionId) {
+					sessionRuntime = 'stateless-fallback';
+				}
 				let sessionContinuation = 'new';
 				let previousClaudeSessionId: string | undefined;
 				let claudeSessionId: string | undefined;
 				let output = '';
 				let textOutput = '';
 				let usage = assembler.getUsage();
+				let structuredOutput: unknown;
+				let suggestions: string[] | undefined;
+				let refusalMessage: string | undefined;
 
-				const trySidecar = params.sessionRuntime === 'sidecar' && Boolean(params.sessionId);
+				const trySidecar = sessionRuntime === 'sidecar' && Boolean(params.sessionId);
 				if (trySidecar) {
 					try {
 						const sidecarBody: SidecarMessageRequest = {
@@ -327,16 +335,27 @@ export class ClaudeAgent implements INodeType {
 						imageUrls,
 						storedSession,
 						assembler,
+						abortSignal: this.getExecutionCancelSignal?.() ?? undefined,
 					});
 					sessionContinuation = turn.continuationKind;
 					previousClaudeSessionId = turn.previousClaudeSessionId;
 					claudeSessionId = turn.claudeSessionId;
-					if (turn.lastError) {
+					refusalMessage = turn.refusalMessage;
+					if (turn.lastError && !turn.refusalMessage) {
 						throw new NodeOperationError(this.getNode(), turn.lastError, { itemIndex });
 					}
 					output = assembler.getOutput();
 					textOutput = assembler.getTextOutput();
 					usage = assembler.getUsage();
+					structuredOutput = assembler.getStructuredOutput();
+					const sdkSuggestions = assembler.getSdkSuggestions();
+					if (sdkSuggestions.length) suggestions = sdkSuggestions;
+					if (!refusalMessage) refusalMessage = assembler.getRefusalMessage();
+				} else {
+					structuredOutput = assembler.getStructuredOutput();
+					const sdkSuggestions = assembler.getSdkSuggestions();
+					if (sdkSuggestions.length) suggestions = sdkSuggestions;
+					refusalMessage = assembler.getRefusalMessage();
 				}
 
 				await assembler.end();
@@ -350,10 +369,16 @@ export class ClaudeAgent implements INodeType {
 					);
 				}
 
+				const structuredValue = structuredOutput ?? assembler.getStructuredOutput();
 				returnData.push({
 					json: {
 						output: output || assembler.getOutput(),
 						textOutput: textOutput || assembler.getTextOutput(),
+						...(structuredValue !== undefined ? { structuredOutput: structuredValue as Record<string, unknown> } : {}),
+						suggestions: suggestions ?? (assembler.getSdkSuggestions().length
+							? assembler.getSdkSuggestions()
+							: undefined),
+						refusalMessage: refusalMessage ?? assembler.getRefusalMessage(),
 						model: modelConfig.model,
 						provider: modelConfig.providerType,
 						profileName: modelConfig.profileName,

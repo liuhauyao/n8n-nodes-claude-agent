@@ -3,6 +3,7 @@ import { modelConfigSummary } from '../../shared/lib/resolveModelConfig';
 import { buildQueryOptions, type BuildQueryOptionsInput } from './buildQueryOptions';
 import type { ClaudeStreamAssembler } from './streamAssembler';
 import { resolveSessionContinuation } from './sessionContinuation';
+import { linkAbortSignal, sanitizeQueryOptionsForSdk } from './queryOptionsSanitize';
 import { resolveUserTurnInput, type SdkUserMessageLike } from './userMessageImages';
 
 export type QueryFn = (params: {
@@ -16,6 +17,7 @@ export interface RunStatelessTurnInput extends Omit<BuildQueryOptionsInput, 'con
 	imageUrls?: string[];
 	storedSession?: StoredSessionRecord;
 	assembler: ClaudeStreamAssembler;
+	abortSignal?: AbortSignal;
 }
 
 export interface RunStatelessTurnResult {
@@ -23,6 +25,7 @@ export interface RunStatelessTurnResult {
 	continuationKind: 'new' | 'resume' | 'fork';
 	previousClaudeSessionId?: string;
 	lastError?: string;
+	refusalMessage?: string;
 }
 
 export async function runStatelessTurn(
@@ -33,18 +36,26 @@ export async function runStatelessTurn(
 		...input,
 		continuation,
 	});
+	const abortController = linkAbortSignal(input.abortSignal);
+	if (abortController) {
+		queryOptions.abortController = abortController;
+	}
 
 	const prompt = resolveUserTurnInput(input.chatInput, input.imageUrls ?? []);
 
 	let lastError: string | undefined;
+	let refusalMessage: string | undefined;
 	for await (const message of input.queryFn({
 		prompt,
-		options: queryOptions,
+		options: sanitizeQueryOptionsForSdk(queryOptions),
 	})) {
 		await input.assembler.consume(message);
 		const record = message as Record<string, unknown>;
 		if (record.type === 'result' && record.subtype === 'error') {
 			lastError = String(record.result ?? 'Claude agent run failed');
+		}
+		if (record.type === 'result' && record.stop_reason === 'refusal') {
+			refusalMessage = String(record.result ?? 'Claude refused the request');
 		}
 	}
 
@@ -62,6 +73,7 @@ export async function runStatelessTurn(
 			? continuation.sourceClaudeSessionId
 			: undefined,
 		lastError,
+		refusalMessage,
 	};
 }
 

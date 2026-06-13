@@ -148,6 +148,128 @@ export const CLAUDE_AGENT_OPTIONS_PROPERTY: INodeProperties = {
 					type: 'boolean',
 					default: true,
 				},
+				{
+					displayName: 'Enable Extended Thinking',
+					name: 'thinkingEnabled',
+					type: 'boolean',
+					default: false,
+					description: 'Enable Claude extended thinking (maps to SDK thinking.type=enabled)',
+				},
+				{
+					displayName: 'Max Thinking Tokens',
+					name: 'maxThinkingTokens',
+					type: 'number',
+					default: 10000,
+					displayOptions: {
+						show: {
+							thinkingEnabled: [true],
+						},
+					},
+				},
+				{
+					displayName: 'Turn Budget (USD)',
+					name: 'maxBudgetUsd',
+					type: 'number',
+					default: 0,
+					description: 'Maximum USD cost per turn (0 = unlimited)',
+				},
+				{
+					displayName: 'Forward Subagent Text',
+					name: 'forwardSubagentText',
+					type: 'boolean',
+					default: false,
+					description: 'Include subagent text output in the main stream when using subagents',
+				},
+			],
+		},
+		{
+			displayName: 'Output',
+			name: 'output',
+			type: 'collection',
+			placeholder: 'Configure Output',
+			default: {},
+			options: [
+				{
+					displayName: 'Structured Output JSON Schema',
+					name: 'outputFormatSchema',
+					type: 'string',
+					typeOptions: { rows: 8 },
+					default: '',
+					description: 'JSON Schema for structured output (maps to SDK outputFormat). Leave empty to disable.',
+				},
+				{
+					displayName: 'Output Schema Name',
+					name: 'outputFormatName',
+					type: 'string',
+					default: 'output',
+				},
+				{
+					displayName: 'Tool Search Mode',
+					name: 'toolSearchMode',
+					type: 'options',
+					default: 'unset',
+					options: [
+						{ name: 'Unset (Provider Default)', value: 'unset' },
+						{ name: 'Enabled', value: 'true' },
+						{ name: 'Auto', value: 'auto' },
+						{ name: 'Disabled', value: 'false' },
+					],
+					description: 'Sets ENABLE_TOOL_SEARCH in SDK env when not unset',
+				},
+			],
+		},
+		{
+			displayName: 'Hooks',
+			name: 'hooks',
+			type: 'collection',
+			placeholder: 'Configure Hooks',
+			default: {},
+			options: [
+				{
+					displayName: 'Hooks Config JSON',
+					name: 'hooksJson',
+					type: 'string',
+					typeOptions: { rows: 8 },
+					default: '',
+					description:
+						'Declarative hooks config. Example: {"preToolUse":{"maxCallsPerTurn":20,"perToolMaxCalls":{"mcp__server__tool":3}}}',
+				},
+			],
+		},
+		{
+			displayName: 'Subagents',
+			name: 'subagents',
+			type: 'collection',
+			placeholder: 'Configure Subagents',
+			default: {},
+			options: [
+				{
+					displayName: 'Enable Subagents',
+					name: 'subagentsEnabled',
+					type: 'boolean',
+					default: false,
+				},
+				{
+					displayName: 'Subagents JSON',
+					name: 'subagentsJson',
+					type: 'string',
+					typeOptions: { rows: 8 },
+					default: '',
+					displayOptions: {
+						show: {
+							subagentsEnabled: [true],
+						},
+					},
+					description: 'JSON array of AgentDefinition objects passed to SDK agents option',
+				},
+				{
+					displayName: 'Primary Agent Override JSON',
+					name: 'primaryAgentJson',
+					type: 'string',
+					typeOptions: { rows: 6 },
+					default: '',
+					description: 'Optional AgentDefinition JSON passed to SDK agent option',
+				},
 			],
 		},
 		{
