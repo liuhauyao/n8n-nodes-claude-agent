@@ -1,8 +1,9 @@
-import { redisGet, redisSetEx, type RedisCredentials } from './redisClient';
+import { redisDel, redisGet, redisSetEx, type RedisCredentials } from './redisClient';
 import type { IDataObject } from 'n8n-workflow';
-import type { StoredSessionRecord } from '../../shared/lib/types';
+import type { LiveSessionMeta, StoredSessionRecord } from '../../shared/lib/types';
 
 const SESSION_KEY_PREFIX = 'claude-agent:session:';
+const LIVE_SESSION_KEY_PREFIX = 'claude-agent:live:';
 const DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 7;
 
 export type { RedisCredentials };
@@ -44,4 +45,41 @@ export async function setStoredSession(
 		JSON.stringify(record),
 		ttlSeconds,
 	);
+}
+
+export async function getLiveSessionMeta(
+	credentials: RedisCredentials,
+	sessionId: string,
+): Promise<LiveSessionMeta | undefined> {
+	if (!sessionId) return undefined;
+	const value = await redisGet(credentials, `${LIVE_SESSION_KEY_PREFIX}${sessionId}`);
+	if (!value) return undefined;
+	try {
+		return JSON.parse(value) as LiveSessionMeta;
+	} catch {
+		return undefined;
+	}
+}
+
+export async function setLiveSessionMeta(
+	credentials: RedisCredentials,
+	sessionId: string,
+	record: LiveSessionMeta,
+	ttlSeconds: number,
+): Promise<void> {
+	if (!sessionId) return;
+	await redisSetEx(
+		credentials,
+		`${LIVE_SESSION_KEY_PREFIX}${sessionId}`,
+		JSON.stringify(record),
+		ttlSeconds,
+	);
+}
+
+export async function deleteLiveSessionMeta(
+	credentials: RedisCredentials,
+	sessionId: string,
+): Promise<void> {
+	if (!sessionId) return;
+	await redisDel(credentials, `${LIVE_SESSION_KEY_PREFIX}${sessionId}`);
 }

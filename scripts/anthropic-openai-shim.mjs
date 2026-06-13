@@ -9,6 +9,15 @@
  */
 import http from 'node:http';
 import { Readable } from 'node:stream';
+import {
+	anthropicToOpenAiRequest,
+	extractOpenAiReasoningText,
+	extractTextContent,
+} from './lib/anthropicOpenAiConvert.mjs';
+import {
+	createOpenAiStreamToAnthropicTranslator,
+	sseEvent,
+} from './lib/openAiReasoningConvert.mjs';
 
 const HOST = process.env.CLAUDE_AGENT_SHIM_HOST ?? '127.0.0.1';
 const PORT = Number(process.env.CLAUDE_AGENT_SHIM_PORT ?? '18789');
@@ -48,116 +57,6 @@ function resolveUpstream(req) {
 	};
 }
 
-function extractTextContent(content) {
-	if (typeof content === 'string') return content;
-	if (!Array.isArray(content)) return '';
-	return content
-		.filter((block) => block && block.type === 'text' && typeof block.text === 'string')
-		.map((block) => block.text)
-		.join('');
-}
-
-function anthropicSystemToOpenAi(system) {
-	if (!system) return [];
-	if (typeof system === 'string') {
-		return system.trim() ? [{ role: 'system', content: system }] : [];
-	}
-	if (!Array.isArray(system)) return [];
-	const text = system
-		.map((block) => (block?.type === 'text' ? block.text : ''))
-		.filter(Boolean)
-		.join('\n');
-	return text ? [{ role: 'system', content: text }] : [];
-}
-
-function anthropicMessagesToOpenAi(messages) {
-	const openAi = [];
-	for (const message of messages ?? []) {
-		const role = message?.role;
-		const content = message?.content;
-
-		if (role === 'user') {
-			if (typeof content === 'string') {
-				openAi.push({ role: 'user', content });
-				continue;
-			}
-			if (Array.isArray(content)) {
-				const toolResults = content.filter((block) => block?.type === 'tool_result');
-				const other = content.filter((block) => block?.type !== 'tool_result');
-				for (const result of toolResults) {
-					openAi.push({
-						role: 'tool',
-						tool_call_id: result.tool_use_id,
-						content:
-							typeof result.content === 'string'
-								? result.content
-								: JSON.stringify(result.content ?? ''),
-					});
-				}
-				const text = extractTextContent(other);
-				if (text) openAi.push({ role: 'user', content: text });
-			}
-			continue;
-		}
-
-		if (role === 'assistant') {
-			if (typeof content === 'string') {
-				openAi.push({ role: 'assistant', content });
-				continue;
-			}
-			if (Array.isArray(content)) {
-				const text = extractTextContent(content);
-				const toolUses = content.filter((block) => block?.type === 'tool_use');
-				const entry = { role: 'assistant', content: text || null };
-				if (toolUses.length > 0) {
-					entry.tool_calls = toolUses.map((tool) => ({
-						id: tool.id,
-						type: 'function',
-						function: {
-							name: tool.name,
-							arguments: JSON.stringify(tool.input ?? {}),
-						},
-					}));
-				}
-				openAi.push(entry);
-			}
-			continue;
-		}
-	}
-
-	return openAi;
-}
-
-function anthropicToolsToOpenAi(tools) {
-	if (!Array.isArray(tools) || tools.length === 0) return undefined;
-	return tools.map((tool) => ({
-		type: 'function',
-		function: {
-			name: tool.name,
-			description: tool.description ?? '',
-			parameters: tool.input_schema ?? { type: 'object', properties: {} },
-		},
-	}));
-}
-
-function anthropicToOpenAiRequest(body) {
-	const messages = [
-		...anthropicSystemToOpenAi(body.system),
-		...anthropicMessagesToOpenAi(body.messages),
-	];
-	const openAi = {
-		model: body.model,
-		messages,
-		max_tokens: body.max_tokens,
-		stream: Boolean(body.stream),
-	};
-	const tools = anthropicToolsToOpenAi(body.tools);
-	if (tools) openAi.tools = tools;
-	if (typeof body.temperature === 'number') openAi.temperature = body.temperature;
-	if (typeof body.top_p === 'number') openAi.top_p = body.top_p;
-	return openAi;
-}
-
 function mapStopReason(finishReason) {
 	switch (finishReason) {
 		case 'tool_calls':
@@ -174,7 +73,15 @@ function openAiToAnthropicResponse(openAiBody, model) {
 	const message = choice.message ?? {};
 	const content = [];
 
-	const text = typeof message.content === 'string' ? message.content : '';
+	const reasoning = extractOpenAiReasoningText(message);
+	if (reasoning) {
+		content.push({ type: 'thinking', thinking: reasoning });
+	}
+
+	const text =
+		typeof message.content === 'string'
+			? message.content
+			: extractTextContent(message.content);
 	if (text) content.push({ type: 'text', text });
 
 	for (const toolCall of message.tool_calls ?? []) {
@@ -207,10 +114,6 @@ function openAiToAnthropicResponse(openAiBody, model) {
 	};
 }
 
-function sseEvent(event, data) {
-	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
 async function pipeOpenAiStreamToAnthropic(upstreamRes, res, model) {
 	res.writeHead(200, {
 		'Content-Type': 'text/event-stream',
@@ -235,9 +138,7 @@ async function pipeOpenAiStreamToAnthropic(upstreamRes, res, model) {
 		}),
 	);
 
-	let textBlockStarted = false;
-	let textBlockIndex = 0;
-	const toolBlocks = new Map();
+	const translator = createOpenAiStreamToAnthropicTranslator((chunk) => res.write(chunk));
 
 	const reader = Readable.fromWeb(upstreamRes.body);
 	let buffer = '';
@@ -260,95 +161,11 @@ async function pipeOpenAiStreamToAnthropic(upstreamRes, res, model) {
 			}
 
 			const delta = parsed.choices?.[0]?.delta ?? {};
-			if (typeof delta.content === 'string' && delta.content.length > 0) {
-				if (!textBlockStarted) {
-					res.write(
-						sseEvent('content_block_start', {
-							type: 'content_block_start',
-							index: textBlockIndex,
-							content_block: { type: 'text', text: '' },
-						}),
-					);
-					textBlockStarted = true;
-				}
-				res.write(
-					sseEvent('content_block_delta', {
-						type: 'content_block_delta',
-						index: textBlockIndex,
-						delta: { type: 'text_delta', text: delta.content },
-					}),
-				);
-			}
-
-			for (const toolDelta of delta.tool_calls ?? []) {
-				const index = toolDelta.index ?? 0;
-				let block = toolBlocks.get(index);
-				if (!block) {
-					block = {
-						blockIndex: textBlockStarted ? textBlockIndex + 1 + index : index,
-						id: toolDelta.id ?? `toolu_${Date.now()}_${index}`,
-						name: toolDelta.function?.name ?? 'tool',
-						arguments: '',
-						started: false,
-					};
-					toolBlocks.set(index, block);
-				}
-				if (toolDelta.id) block.id = toolDelta.id;
-				if (toolDelta.function?.name) block.name = toolDelta.function.name;
-				if (typeof toolDelta.function?.arguments === 'string') {
-					block.arguments += toolDelta.function.arguments;
-				}
-				if (!block.started) {
-					res.write(
-						sseEvent('content_block_start', {
-							type: 'content_block_start',
-							index: block.blockIndex,
-							content_block: {
-								type: 'tool_use',
-								id: block.id,
-								name: block.name,
-								input: {},
-							},
-						}),
-					);
-					block.started = true;
-				}
-				if (toolDelta.function?.arguments) {
-					res.write(
-						sseEvent('content_block_delta', {
-							type: 'content_block_delta',
-							index: block.blockIndex,
-							delta: {
-								type: 'input_json_delta',
-								partial_json: toolDelta.function.arguments,
-							},
-						}),
-					);
-				}
-			}
+			translator.processDelta(delta);
 		}
 	}
 
-	if (textBlockStarted) {
-		res.write(
-			sseEvent('content_block_stop', {
-				type: 'content_block_stop',
-				index: textBlockIndex,
-			}),
-		);
-	}
-	for (const block of toolBlocks.values()) {
-		if (block.started) {
-			res.write(
-				sseEvent('content_block_stop', {
-					type: 'content_block_stop',
-					index: block.blockIndex,
-				}),
-			);
-		}
-	}
-
-	const stopReason = toolBlocks.size > 0 ? 'tool_use' : 'end_turn';
+	const stopReason = translator.finish();
 	res.write(
 		sseEvent('message_delta', {
 			type: 'message_delta',
@@ -456,7 +273,12 @@ const server = http.createServer(async (req, res) => {
 	try {
 		const path = (req.url ?? '').split('?')[0];
 		if (req.method === 'GET' && path === '/health') {
-			jsonResponse(res, 200, { ok: true, service: 'anthropic-openai-shim' });
+			jsonResponse(res, 200, {
+				ok: true,
+				service: 'anthropic-openai-shim',
+				image_convert_ok: true,
+				reasoning_convert_ok: true,
+			});
 			return;
 		}
 

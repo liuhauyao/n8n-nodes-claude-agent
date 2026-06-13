@@ -7,12 +7,11 @@ import {
 	type INodeTypeDescription,
 } from 'n8n-workflow';
 
-import { mergeSdkEnvWithProcess } from '../shared/lib/buildSdkEnv';
 import {
 	modelConfigSummary,
 	resolveModelConfigForAgent,
 } from '../shared/lib/resolveModelConfig';
-import type { ClaudeModelConfig, StoredSessionRecord } from '../shared/lib/types';
+import type { ClaudeModelConfig, SessionRuntimeMode } from '../shared/lib/types';
 import { claudeProviderCredentialTest } from '../shared/lib/claudeProviderCredentialTest';
 import { CLAUDE_MODEL_CONFIG_FIELD } from '../shared/lib/types';
 import { CLAUDE_AGENT_OPTIONS_PROPERTY } from './lib/agentOptionsProperties';
@@ -34,96 +33,18 @@ import {
 } from './lib/readNodeParameters';
 import { getStoredSession, setStoredSession } from './lib/sessionStore';
 import { ClaudeStreamAssembler } from './lib/streamAssembler';
-
-/** Headless n8n 不可用：无交互通道，启用会导致空转循环 */
-const HEADLESS_DISALLOWED_TOOLS = ['AskUserQuestion', 'TodoWrite'] as const;
-
-function mergeDisallowedTools(presetTools?: string[]): string[] {
-	const merged = new Set<string>(HEADLESS_DISALLOWED_TOOLS);
-	if (presetTools) {
-		for (const tool of presetTools) merged.add(tool);
-	}
-	return [...merged];
-}
-
-type PermissionPresetConfig = {
-	allowedTools?: string[];
-	disallowedTools?: string[];
-	permissionMode?: string;
-	allowDangerouslySkipPermissions?: boolean;
-	tools?: { type: 'preset'; preset: 'claude_code' } | readonly string[];
-	defaultStrictMcpConfig?: boolean;
-};
-
-/** 代码只读模式：注册 claude_code 工具集，再靠 allowed/disallowed 收窄到 Read/Grep/Glob */
-const CODEBASE_READ_TOOLS = {
-	tools: { type: 'preset', preset: 'claude_code' } as const,
-	allowedTools: ['Read', 'Grep', 'Glob'],
-	disallowedTools: [
-		'Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
-	],
-	permissionMode: 'bypassPermissions',
-	allowDangerouslySkipPermissions: true,
-};
-
-const PERMISSION_PRESETS: Record<string, PermissionPresetConfig> = {
-	customer_service: {
-		...CODEBASE_READ_TOOLS,
-	},
-	read_only: {
-		...CODEBASE_READ_TOOLS,
-	},
-	mcp_skills_only: {
-		// 保留 claude_code 工具注册，便于流式输出 tool_start/tool_end；执行由 disallowedTools + dontAsk 拦截
-		tools: { type: 'preset', preset: 'claude_code' },
-		disallowedTools: [
-			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
-			'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
-		],
-		permissionMode: 'dontAsk',
-		defaultStrictMcpConfig: true,
-	},
-	plan_only: {
-		tools: { type: 'preset', preset: 'claude_code' },
-		disallowedTools: [
-			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
-			'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
-		],
-		// dontAsk：工具调用仍出现在流式 UI，但一律拒绝执行（plan 模式则完全不产生 tool 事件）
-		permissionMode: 'dontAsk',
-	},
-	full_agent: {
-		tools: { type: 'preset', preset: 'claude_code' },
-		permissionMode: 'bypassPermissions',
-		allowDangerouslySkipPermissions: true,
-	},
-};
-
-const LEGACY_PERMISSION_PRESET_ALIASES: Record<string, keyof typeof PERMISSION_PRESETS> = {
-	world_assistant: 'full_agent',
-};
-
-function resolvePermissionPreset(raw: string): keyof typeof PERMISSION_PRESETS {
-	const key = LEGACY_PERMISSION_PRESET_ALIASES[raw] ?? raw;
-	if (key in PERMISSION_PRESETS) {
-		return key as keyof typeof PERMISSION_PRESETS;
-	}
-	return 'customer_service';
-}
-
-function canResumeClaudeSession(
-	current: ClaudeModelConfig,
-	stored: StoredSessionRecord | undefined,
-): boolean {
-	if (!stored?.claudeSessionId) return false;
-	if (!stored.modelConfig?.model) return true;
-	const storedConfig = stored.modelConfig;
-	return (
-		storedConfig.model === current.model
-		&& storedConfig.providerType === current.providerType
-		&& storedConfig.profileIndex === current.profileIndex
-	);
-}
+import { runStatelessTurn, toStoredRecord } from './lib/runStatelessTurn';
+import {
+	consumeSidecarStreamWithMeta,
+	isSidecarUnavailableError,
+	postSidecarMessage,
+	type SidecarMessageRequest,
+} from './lib/sidecarClient';
+import { resolvePermissionPreset } from './lib/permissionPresets';
+import {
+	hasUserTurnContent,
+	normalizeImageUrls,
+} from './lib/userMessageImages';
 
 export class ClaudeAgent implements INodeType {
 	methods = {
@@ -263,8 +184,9 @@ export class ClaudeAgent implements INodeType {
 					| 'fromCredential'
 					| 'fromInput';
 				const params = readClaudeAgentRunParams(this, itemIndex);
+				const imageUrls = normalizeImageUrls(itemJson.imageUrls, params.chatInput);
 
-				if (!params.chatInput?.trim()) {
+				if (!hasUserTurnContent(params.chatInput, imageUrls)) {
 					throw new NodeOperationError(this.getNode(), 'User message (chatInput) is empty', { itemIndex });
 				}
 
@@ -285,7 +207,6 @@ export class ClaudeAgent implements INodeType {
 				const storedSession = params.sessionId && redis
 					? await getStoredSession(redis, params.sessionId)
 					: undefined;
-				const resumeSession = canResumeClaudeSession(modelConfig, storedSession);
 
 				const resolvedWorkspace = params.hasWorkspaceConfig
 					? resolveWorkingDir({
@@ -311,21 +232,16 @@ export class ClaudeAgent implements INodeType {
 					params.mcpToolAccess,
 					mcpAllowedSdk,
 				);
-				const preset = PERMISSION_PRESETS[presetKey];
-				const strictMcpConfig = params.strictMcpConfig || preset.defaultStrictMcpConfig === true;
 
-				const systemMessage = params.systemMessage?.trim() ?? '';
-				const userMessage = params.chatInput.trim();
-				// 用户消息单独作为 prompt；systemMessage 仅写入 systemPrompt（首条与续聊均如此）
-				const prompt = userMessage;
+				const onStructured = async (jsonContent: string) => {
+					if (this.isStreaming()) await this.sendChunk('item', itemIndex, jsonContent);
+				};
 
 				const assembler = new ClaudeStreamAssembler({
 					onBegin: async () => {
 						if (this.isStreaming()) await this.sendChunk('begin', itemIndex);
 					},
-					onStructured: async (jsonContent: string) => {
-						if (this.isStreaming()) await this.sendChunk('item', itemIndex, jsonContent);
-					},
+					onStructured,
 					onEnd: async () => {
 						if (this.isStreaming()) await this.sendChunk('end', itemIndex);
 					},
@@ -333,95 +249,119 @@ export class ClaudeAgent implements INodeType {
 
 				await assembler.begin();
 
-				const queryOptions: Record<string, unknown> = {
+				const queryInputBase = {
+					modelConfig,
 					cwd,
-					...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
-					settingSources: params.hasWorkspaceConfig ? params.settingSources : ['project'],
-					includePartialMessages: true,
-					model: modelConfig.model,
-					env: mergeSdkEnvWithProcess(modelConfig.sdkEnv),
-					...(resumeSession && storedSession?.claudeSessionId
-						? { resume: storedSession.claudeSessionId }
-						: {}),
-					...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
-					...(strictMcpConfig ? { strictMcpConfig: true } : {}),
-					...(params.skills ? { skills: params.skills } : {}),
-					...(params.maxTurns > 0 ? { maxTurns: params.maxTurns } : {}),
-					...(preset.allowedTools || mcpPreApproved.length > 0
-						? {
-							allowedTools: [
-								...(preset.allowedTools ?? []),
-								...mcpPreApproved,
-							],
-						}
-						: {}),
-					disallowedTools: mergeDisallowedTools([
-						...(preset.disallowedTools ?? []),
-						...mcpDisallowedSdk,
-					]),
-					...(preset.permissionMode ? { permissionMode: preset.permissionMode } : {}),
-					...(preset.allowDangerouslySkipPermissions
-						? { allowDangerouslySkipPermissions: true }
-						: {}),
-					...(preset.tools !== undefined
-						? {
-							tools: Array.isArray(preset.tools)
-								? [...preset.tools]
-								: preset.tools,
-						}
-						: {}),
+					additionalDirectories,
+					settingSources: params.settingSources,
+					hasWorkspaceConfig: params.hasWorkspaceConfig,
+					systemMessage: params.systemMessage,
+					useClaudeCodePreset: params.useClaudeCodePreset,
+					mcpServers,
+					mcpServerNames,
+					mcpDisallowedSdk,
+					mcpAllowedSdk,
+					mcpPreApproved,
+					permissionPreset: params.permissionPreset,
+					strictMcpConfig: params.strictMcpConfig,
+					skills: params.skills,
+					maxTurns: params.maxTurns,
 				};
 
-				if (params.useClaudeCodePreset) {
-					queryOptions.systemPrompt = systemMessage
-						? { type: 'preset', preset: 'claude_code', append: systemMessage }
-						: { type: 'preset', preset: 'claude_code' };
-				} else if (systemMessage) {
-					queryOptions.systemPrompt = systemMessage;
+				let sessionRuntime: SessionRuntimeMode | 'stateless-fallback' = params.sessionRuntime;
+				let sessionContinuation = 'new';
+				let previousClaudeSessionId: string | undefined;
+				let claudeSessionId: string | undefined;
+				let output = '';
+				let textOutput = '';
+				let usage = assembler.getUsage();
+
+				const trySidecar = params.sessionRuntime === 'sidecar' && Boolean(params.sessionId);
+				if (trySidecar) {
+					try {
+						const sidecarBody: SidecarMessageRequest = {
+							chatInput: params.chatInput.trim(),
+							imageUrls,
+							systemMessage: params.systemMessage,
+							modelConfig,
+							params,
+							useClaudeCodePreset: params.useClaudeCodePreset,
+							cwd,
+							additionalDirectories,
+							mcpServers,
+							mcpServerNames,
+							mcpDisallowedSdk,
+							mcpAllowedSdk,
+							mcpPreApproved,
+						};
+						const abortSignal = this.getExecutionCancelSignal?.();
+						const stream = await postSidecarMessage(
+							params.sidecarUrl,
+							params.sessionId,
+							sidecarBody,
+							abortSignal ?? undefined,
+						);
+						const doneMeta = await consumeSidecarStreamWithMeta(stream, onStructured);
+						sessionRuntime = 'sidecar';
+						if (doneMeta) {
+							output = doneMeta.output;
+							textOutput = doneMeta.textOutput;
+							claudeSessionId = doneMeta.claudeSessionId;
+							usage = doneMeta.usage;
+							sessionContinuation = doneMeta.sessionContinuation;
+							previousClaudeSessionId = doneMeta.previousClaudeSessionId;
+						}
+					} catch (error) {
+						if (!isSidecarUnavailableError(error)) {
+							throw error;
+						}
+						sessionRuntime = 'stateless-fallback';
+					}
 				}
 
-				let lastError: string | undefined;
-				for await (const message of queryFn({
-					prompt,
-					options: queryOptions,
-				})) {
-					await assembler.consume(message);
-					const record = message as Record<string, unknown>;
-					if (record.type === 'result' && record.subtype === 'error') {
-						lastError = String(record.result ?? 'Claude agent run failed');
+				if (sessionRuntime !== 'sidecar') {
+					const turn = await runStatelessTurn({
+						...queryInputBase,
+						queryFn,
+						chatInput: params.chatInput.trim(),
+						imageUrls,
+						storedSession,
+						assembler,
+					});
+					sessionContinuation = turn.continuationKind;
+					previousClaudeSessionId = turn.previousClaudeSessionId;
+					claudeSessionId = turn.claudeSessionId;
+					if (turn.lastError) {
+						throw new NodeOperationError(this.getNode(), turn.lastError, { itemIndex });
 					}
+					output = assembler.getOutput();
+					textOutput = assembler.getTextOutput();
+					usage = assembler.getUsage();
 				}
 
 				await assembler.end();
 
-				if (lastError) {
-					throw new NodeOperationError(this.getNode(), lastError, { itemIndex });
-				}
-
-				const claudeSessionId = assembler.getSessionId()
-					?? (resumeSession ? storedSession?.claudeSessionId : undefined);
 				if (params.sessionId && claudeSessionId && redis) {
 					await setStoredSession(
 						redis,
 						params.sessionId,
-						{
-							claudeSessionId,
-							modelConfig: modelConfigSummary(modelConfig),
-						},
+						toStoredRecord(modelConfig, claudeSessionId),
 						params.sessionTtlSeconds,
 					);
 				}
 
-				const usage = assembler.getUsage();
 				returnData.push({
 					json: {
-						output: assembler.getOutput(),
-						textOutput: assembler.getTextOutput(),
+						output: output || assembler.getOutput(),
+						textOutput: textOutput || assembler.getTextOutput(),
 						model: modelConfig.model,
 						provider: modelConfig.providerType,
 						profileName: modelConfig.profileName,
 						claudeSessionId,
 						sessionId: params.sessionId || undefined,
+						sessionContinuation,
+						sessionRuntime,
+						previousClaudeSessionId,
 						costUsd: usage?.costUsd,
 						usage,
 					},

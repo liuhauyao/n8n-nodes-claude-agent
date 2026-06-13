@@ -38,6 +38,37 @@ export const CLAUDE_AGENT_OPTIONS_PROPERTY: INodeProperties = {
 					type: 'number',
 					default: 604800,
 				},
+				{
+					displayName: 'Session Runtime',
+					name: 'sessionRuntime',
+					type: 'options',
+					default: 'sidecar',
+					options: [
+						{
+							name: 'Sidecar (Recommended)',
+							value: 'sidecar',
+							description:
+								'Long-lived Agent Sidecar on localhost; supports setModel() for model switches without losing context',
+						},
+						{
+							name: 'Stateless (Fallback)',
+							value: 'stateless',
+							description: 'Cold query() per n8n execution; uses resume/forkSession for session continuity',
+						},
+					],
+				},
+				{
+					displayName: 'Sidecar URL',
+					name: 'sidecarUrl',
+					type: 'string',
+					default: '={{ $env.CLAUDE_AGENT_SIDECAR_URL || "http://127.0.0.1:18790" }}',
+					displayOptions: {
+						show: {
+							sessionRuntime: ['sidecar'],
+						},
+					},
+					description: 'Base URL of claude-agent-sidecar (default http://127.0.0.1:18790)',
+				},
 			],
 		},
 		{

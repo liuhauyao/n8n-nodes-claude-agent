@@ -51,6 +51,16 @@ export interface StoredSessionRecord {
 	modelConfig: Pick<ClaudeModelConfig, 'providerType' | 'profileName' | 'model' | 'profileIndex'>;
 }
 
+export interface LiveSessionMeta {
+	sidecarPid: number;
+	claudeSessionId: string;
+	modelConfig: StoredSessionRecord['modelConfig'];
+	lastActiveAt: number;
+	streaming: boolean;
+}
+
+export type SessionRuntimeMode = 'sidecar' | 'stateless';
+
 export const CLAUDE_MODEL_CONFIG_FIELD = 'claudeModelConfig';
 
 export const PROVIDER_TYPE_OPTIONS: Array<{ name: string; value: ProviderType; description?: string }> = [

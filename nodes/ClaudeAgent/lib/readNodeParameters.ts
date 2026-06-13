@@ -1,5 +1,6 @@
 import { NodeOperationError, type IDataObject, type IExecuteFunctions, type INode } from 'n8n-workflow';
 
+import type { SessionRuntimeMode } from '../../shared/lib/types';
 import type { McpToolAccessConfig } from './mcpToolAccess';
 import type { McpServersFormValue } from './parseMcpServers';
 import { readRedisCredentials, type RedisCredentials } from './sessionStore';
@@ -11,6 +12,8 @@ export interface ClaudeAgentRunParams {
 	chatInput: string;
 	sessionId: string;
 	sessionTtlSeconds: number;
+	sessionRuntime: SessionRuntimeMode;
+	sidecarUrl: string;
 	skillsRoot: string;
 	workingDirectories: string[];
 	workingDirectory: string;
@@ -92,6 +95,14 @@ export function readClaudeAgentRunParams(
 		?? 604800,
 	);
 
+	const sessionRuntimeRaw = pickString(session.sessionRuntime) || 'sidecar';
+	const sessionRuntime: SessionRuntimeMode =
+		sessionRuntimeRaw === 'stateless' ? 'stateless' : 'sidecar';
+
+	const sidecarUrl =
+		pickString(session.sidecarUrl)
+		|| 'http://127.0.0.1:18790';
+
 	const permissionPreset =
 		pickString(agentBehavior.permissionPreset)
 		|| pickString(ctx.getNodeParameter('permissionPreset', itemIndex, 'customer_service'))
@@ -139,6 +150,8 @@ export function readClaudeAgentRunParams(
 		chatInput: pickString(ctx.getNodeParameter('chatInput', itemIndex, '')),
 		sessionId: sessionId.trim(),
 		sessionTtlSeconds,
+		sessionRuntime,
+		sidecarUrl: sidecarUrl.trim(),
 		skillsRoot: skillsRoot.trim(),
 		workingDirectories,
 		workingDirectory: workingDirectory.trim(),

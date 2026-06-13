@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-claude-sdk-agent",
-  "version": "1.4.3",
+  "version": "1.6.3",
   "description": "n8n community nodes — Claude Agent SDK with Model Selector, Provider credentials, streaming, MCP and skills.",
   "keywords": [
     "n8n-community-node-package",
@@ -34,11 +34,24 @@
     "lint": "eslint dist && node scripts/lint-package-json.mjs",
     "dev": "tsc --watch",
     "poc": "node scripts/poc-local.mjs",
+    "poc:resume-fork": "node scripts/poc-resume-fork.mjs",
+    "poc:sidecar": "node scripts/poc-sidecar-stream.mjs",
+    "test:session": "npm run build && node --test tests/sessionContinuation.test.mjs",
+    "test:user-images": "npm run build && node --test tests/userMessageImages.test.mjs",
+    "test:shim-convert": "node --test tests/anthropicOpenAiConvert.test.mjs tests/openAiReasoningConvert.test.mjs",
+    "test:utf8-guard": "npm run build && node --test tests/utf8ReplacementGuard.test.mjs",
+    "build:sidecar": "npm run build && cd services/claude-agent-sidecar && npm install && npm run build",
+    "sidecar": "node services/claude-agent-sidecar/dist/index.js",
     "shim": "node scripts/anthropic-openai-shim.mjs"
   },
   "files": [
     "dist",
+    "services/claude-agent-sidecar",
     "scripts/anthropic-openai-shim.mjs",
+    "scripts/lib/anthropicOpenAiConvert.mjs",
+    "scripts/lib/openAiReasoningConvert.mjs",
+    "scripts/poc-resume-fork.mjs",
+    "scripts/poc-sidecar-stream.mjs",
     "README.md",
     "LICENSE"
   ],

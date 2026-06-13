@@ -18,7 +18,7 @@ Includes:
 |------|-------|
 | Node.js | `>= 22.16` |
 | n8n | Self-hosted (not n8n Cloud) |
-| Redis | Required on Claude Agent node (session + model lock) |
+| Redis | Required on Claude Agent node (session persistence + Sidecar live metadata) |
 | Host SDK | Install in `~/.n8n/nodes` (see below) |
 
 ---
@@ -128,6 +128,51 @@ Credential test: ① probes upstream `GET /models`; ② sends a test message via
 |-----------|-------------|
 | Model Config Source | `fromSelector` / `fromCredential` / `fromInput` |
 
+### Session continuation (1.6.0+)
+
+Multi-turn context uses the Claude SDK session transcript on disk (`~/.claude/projects/...`). Redis stores `{ claudeSessionId, modelConfig }` only.
+
+| Change | Sidecar runtime | Stateless runtime |
+|--------|-----------------|-------------------|
+| Same model + profile | `streamInput` + resume | `resume` |
+| Model only (same profile) | `setModel()` + `streamInput` | `resume` + `forkSession` + new `model` |
+| Profile / provider change | close → fork bridge → new streaming | `resume` + `forkSession` + new `env` |
+| New session | cold streaming `query` | new `query` |
+
+**Options → Session → Session Runtime**
+
+| Value | Behavior |
+|-------|----------|
+| **Sidecar (Recommended)** | Long-lived `claude-agent-sidecar` on localhost; supports `setModel()` without losing context |
+| **Stateless (Fallback)** | Cold `query()` per n8n execution; Sidecar unreachable → auto `stateless-fallback` once |
+
+Output debug fields: `sessionContinuation` (`new` / `resume` / `fork` / `setModel`), `sessionRuntime` (`sidecar` / `stateless` / `stateless-fallback`), `previousClaudeSessionId` (when forked).
+
+### Agent Sidecar deployment
+
+See `services/claude-agent-sidecar/ecosystem.config.cjs`. Default listen: `127.0.0.1:18790` (localhost only).
+
+```bash
+cd ~/.n8n/nodes && npm install n8n-nodes-claude-sdk-agent@1.6.0
+cd node_modules/n8n-nodes-claude-sdk-agent
+npm run build:sidecar
+pm2 start services/claude-agent-sidecar/ecosystem.config.cjs --name claude-agent-sidecar
+pm2 restart n8n
+```
+
+Sidecar `.env` (same Redis as Claude Agent node): `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, optional `SIDECAR_IDLE_TIMEOUT_MS` (default 30min), `SIDECAR_MAX_SESSIONS` (default 64).
+
+In n8n: **Claude Agent → Options → Session → Session Runtime = Sidecar**, Sidecar URL = `http://127.0.0.1:18790`.
+
+POC scripts:
+
+```bash
+npm run test:session          # continuation matrix
+npm run poc:resume-fork       # Phase A (needs ANTHROPIC_API_KEY)
+npm run sidecar               # start sidecar (terminal 1)
+npm run poc:sidecar           # Phase B client (terminal 2)
+```
+
 ### Permission presets
 
 | Preset | Description |
@@ -177,6 +222,9 @@ Streaming output uses `__claude__` JSON chunks.
 | `output` | Full response body: Markdown (including `<next>` blocks) + `<claude_meta>` (toolCalls / timeline / suggestions) |
 | `textOutput` | Plain Markdown only (no `<next>`, no `<claude_meta>`); suitable for passing directly to downstream nodes |
 | `claudeSessionId` | Claude SDK session id |
+| `sessionContinuation` | `new` / `resume` / `fork` / `setModel` — how this turn continued the SDK session |
+| `sessionRuntime` | `sidecar` / `stateless` / `stateless-fallback` |
+| `previousClaudeSessionId` | Source session when `sessionContinuation=fork` |
 | `usage` / `costUsd` | Token counts and cost (when available) |
 
 ---
