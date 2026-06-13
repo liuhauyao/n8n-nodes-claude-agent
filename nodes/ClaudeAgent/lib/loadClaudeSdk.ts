@@ -19,7 +19,9 @@ function formatClaudeSdkLoadError(error: unknown): Error {
 	if (message.includes('Cannot resolve "@anthropic-ai/claude-agent-sdk"')) {
 		return new Error(
 			'@anthropic-ai/claude-agent-sdk is not installed in ~/.n8n/nodes. '
-				+ 'Add "@anthropic-ai/claude-agent-sdk": "0.3.150" to ~/.n8n/nodes/package.json, run npm install, then restart n8n.',
+				+ 'Add "@anthropic-ai/claude-agent-sdk" and the matching "@anthropic-ai/claude-agent-sdk-linux-x64" '
+				+ '(or your platform binary) to ~/.n8n/nodes/package.json, run npm install, then restart n8n. '
+				+ 'See n8n-nodes-claude-sdk-agent README → Host dependencies.',
 		);
 	}
 	return error instanceof Error ? error : new Error(message);

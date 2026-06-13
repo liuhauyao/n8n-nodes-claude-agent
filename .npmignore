@@ -1,0 +1,5 @@
+services/claude-agent-sidecar/node_modules
+services/claude-agent-sidecar/package-lock.json
+services/claude-agent-sidecar/src
+node_modules
+*.tgz

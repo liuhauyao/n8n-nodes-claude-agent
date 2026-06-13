@@ -1,5 +1,6 @@
 node_modules/
 dist/
+services/claude-agent-sidecar/node_modules/
 *.log
 *.tgz
 .DS_Store

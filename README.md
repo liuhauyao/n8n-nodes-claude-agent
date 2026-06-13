@@ -31,17 +31,17 @@ Settings → Community Nodes → Install → `n8n-nodes-claude-sdk-agent`
 
 ### Host dependencies (`~/.n8n/nodes/package.json`)
 
-Community nodes must not bundle the SDK. Install alongside the node package:
+Community nodes must not bundle the SDK. Install alongside the node package in `~/.n8n/nodes` (versions should match; check this package README or npm page for the recommended SDK release):
 
 ```json
 {
   "dependencies": {
-    "n8n-nodes-claude-sdk-agent": "1.0.0",
-    "@anthropic-ai/claude-agent-sdk": "0.3.150"
+    "n8n-nodes-claude-sdk-agent": "<version from n8n UI>",
+    "@anthropic-ai/claude-agent-sdk": "<recommended SDK version>"
   },
   "optionalDependencies": {
-    "@anthropic-ai/claude-agent-sdk-linux-x64": "0.3.150",
-    "@anthropic-ai/claude-agent-sdk-linux-arm64": "0.3.150"
+    "@anthropic-ai/claude-agent-sdk-linux-x64": "<same as SDK>",
+    "@anthropic-ai/claude-agent-sdk-linux-arm64": "<same as SDK>"
   }
 }
 ```
@@ -153,7 +153,7 @@ Output debug fields: `sessionContinuation` (`new` / `resume` / `fork` / `setMode
 See `services/claude-agent-sidecar/ecosystem.config.cjs`. Default listen: `127.0.0.1:18790` (localhost only).
 
 ```bash
-cd ~/.n8n/nodes && npm install n8n-nodes-claude-sdk-agent@1.6.0
+cd ~/.n8n/nodes && npm install n8n-nodes-claude-sdk-agent
 cd node_modules/n8n-nodes-claude-sdk-agent
 npm run build:sidecar
 pm2 start services/claude-agent-sidecar/ecosystem.config.cjs --name claude-agent-sidecar
