@@ -47,6 +47,8 @@ class LiveSession {
 	hookRuntimeState?: HookRuntimeState;
 	/** 当前轮次已生成的文本缓冲，用于断线重连时向客户端提供进度快照 */
 	currentTurnBuffer = '';
+	/** 当前会话的 MCP 工具拒绝列表（每轮消息更新，通过 applyFlagSettings 生效） */
+	currentMcpDisallowedSdk: string[] = [];
 	private turnWaiter?: TurnWaiter;
 	private closed = false;
 
@@ -228,6 +230,17 @@ export class SessionManager {
 		}
 
 		live.currentTurnBuffer = '';
+
+		// 每轮消息前动态更新 MCP 工具拒绝列表，确保模式切换立即生效（不依赖 session 创建时锁定的 disallowedTools）
+		live.currentMcpDisallowedSdk = req.mcpDisallowedSdk ?? [];
+		if (live.query) {
+			await live.query.applyFlagSettings({
+				permissions: {
+					deny: live.currentMcpDisallowedSdk,
+				},
+			});
+		}
+
 		live.pushUserMessage(req.chatInput, req.imageUrls ?? []);
 		await live.waitForTurn(this.config.messageTimeoutMs);
 
@@ -345,6 +358,8 @@ export class SessionManager {
 	): Promise<LiveSession> {
 		const live = new LiveSession(businessSessionId, req.modelConfig);
 		const { query: queryFn } = await loadClaudeSdk();
+		// 注意：mcpDisallowedSdk 传空数组，不在 session 创建时锁定工具拒绝列表；
+		// 每轮消息前由 handleMessage 通过 applyFlagSettings 动态设置，支持模式切换不丢上下文。
 		const queryOptions = buildQueryOptions({
 			continuation,
 			modelConfig: req.modelConfig,
@@ -356,7 +371,7 @@ export class SessionManager {
 			useClaudeCodePreset: req.useClaudeCodePreset,
 			mcpServers: req.mcpServers,
 			mcpServerNames: req.mcpServerNames,
-			mcpDisallowedSdk: req.mcpDisallowedSdk,
+			mcpDisallowedSdk: [],
 			mcpAllowedSdk: req.mcpAllowedSdk,
 			mcpPreApproved: req.mcpPreApproved,
 			permissionPreset: req.params.permissionPreset,
