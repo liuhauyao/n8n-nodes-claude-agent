@@ -386,14 +386,18 @@ export class SessionManager {
 			for await (const message of query) {
 				const sink = live.currentSink;
 				if (sink) await sink.consumeSdkMessage(message);
-				// 累积文本到轮次缓冲，供断线重连时获取进度快照
-				const record = message as Record<string, unknown>;
-				if (record.type === 'content_block_delta') {
-					const delta = record.delta as Record<string, unknown> | undefined;
+			// 累积文本到轮次缓冲，供断线重连时获取进度快照
+			// Claude SDK 消息结构：{ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } }
+			const record = message as Record<string, unknown>;
+			if (record.type === 'stream_event') {
+				const event = record.event as Record<string, unknown> | undefined;
+				if (event?.type === 'content_block_delta') {
+					const delta = event.delta as Record<string, unknown> | undefined;
 					if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
 						live.currentTurnBuffer += delta.text;
 					}
 				}
+			}
 			if (typeof record.session_id === 'string' && record.session_id) {
 					live.claudeSessionId = record.session_id;
 				}
