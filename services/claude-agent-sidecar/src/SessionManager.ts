@@ -45,6 +45,8 @@ class LiveSession {
 	currentSink?: SidecarStreamSink;
 	consumerStarted = false;
 	hookRuntimeState?: HookRuntimeState;
+	/** 当前轮次已生成的文本缓冲，用于断线重连时向客户端提供进度快照 */
+	currentTurnBuffer = '';
 	private turnWaiter?: TurnWaiter;
 	private closed = false;
 
@@ -90,6 +92,10 @@ class LiveSession {
 		} else {
 			waiter.resolve();
 		}
+	}
+
+	isBusy(): boolean {
+		return this.turnWaiter !== undefined;
 	}
 
 	pushUserMessage(content: string, imageUrls: string[] = []): void {
@@ -139,6 +145,13 @@ export class SessionManager {
 
 	getActiveSessionCount(): number {
 		return this.sessions.size;
+	}
+
+	/** 获取当前轮次已生成的文本缓冲，用于断线重连场景 */
+	getSessionBuffer(businessSessionId: string): { content: string; active: boolean } | null {
+		const live = this.sessions.get(businessSessionId);
+		if (!live) return null;
+		return { content: live.currentTurnBuffer, active: live.isBusy() };
 	}
 
 	async abortSession(businessSessionId: string): Promise<boolean> {
@@ -214,6 +227,7 @@ export class SessionManager {
 			live.modelConfig = req.modelConfig;
 		}
 
+		live.currentTurnBuffer = '';
 		live.pushUserMessage(req.chatInput, req.imageUrls ?? []);
 		await live.waitForTurn(this.config.messageTimeoutMs);
 
@@ -372,8 +386,15 @@ export class SessionManager {
 			for await (const message of query) {
 				const sink = live.currentSink;
 				if (sink) await sink.consumeSdkMessage(message);
+				// 累积文本到轮次缓冲，供断线重连时获取进度快照
 				const record = message as Record<string, unknown>;
-				if (typeof record.session_id === 'string' && record.session_id) {
+				if (record.type === 'content_block_delta') {
+					const delta = record.delta as Record<string, unknown> | undefined;
+					if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
+						live.currentTurnBuffer += delta.text;
+					}
+				}
+			if (typeof record.session_id === 'string' && record.session_id) {
 					live.claudeSessionId = record.session_id;
 				}
 			if (record.type === 'result') {

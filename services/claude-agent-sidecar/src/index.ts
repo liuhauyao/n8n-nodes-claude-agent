@@ -74,7 +74,7 @@ async function main(): Promise<void> {
 				return;
 			}
 
-			const sessionMatch = /^\/v1\/sessions\/([^/]+)(?:\/messages)?$/.exec(url.pathname);
+			const sessionMatch = /^\/v1\/sessions\/([^/]+)(?:\/(messages|buffer))?$/.exec(url.pathname);
 			if (!sessionMatch) {
 				sendJson(res, 404, { error: 'not found' });
 				return;
@@ -82,13 +82,24 @@ async function main(): Promise<void> {
 
 			const businessSessionId = decodeURIComponent(sessionMatch[1]);
 
-			if (req.method === 'DELETE' && url.pathname === `/v1/sessions/${businessSessionId}`) {
+			if (req.method === 'DELETE' && !sessionMatch[2]) {
 				const aborted = await manager.abortSession(businessSessionId);
 				sendJson(res, 200, { aborted });
 				return;
 			}
 
-			if (req.method === 'POST' && url.pathname === `/v1/sessions/${businessSessionId}/messages`) {
+			// 断线重连：获取当前轮次已生成文本缓冲
+			if (req.method === 'GET' && sessionMatch[2] === 'buffer') {
+				const buffer = manager.getSessionBuffer(businessSessionId);
+				if (!buffer) {
+					sendJson(res, 404, { error: 'session not found' });
+					return;
+				}
+				sendJson(res, 200, buffer);
+				return;
+			}
+
+			if (req.method === 'POST' && sessionMatch[2] === 'messages') {
 				const body = await readJsonBody<Record<string, unknown>>(req);
 				const parsed = parseSidecarRequest(body);
 				if (!hasUserTurnContent(parsed.chatInput, parsed.imageUrls ?? [])) {
