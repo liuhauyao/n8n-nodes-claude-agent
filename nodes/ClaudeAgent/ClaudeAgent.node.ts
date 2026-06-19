@@ -33,6 +33,7 @@ import {
 } from './lib/readNodeParameters';
 import { getStoredSession, setStoredSession } from './lib/sessionStore';
 import { ClaudeStreamAssembler } from './lib/streamAssembler';
+import { encodeClaudeStreamPayload } from './lib/claudeStreamProtocol';
 import { runStatelessTurn, toStoredRecord } from './lib/runStatelessTurn';
 import {
 	consumeSidecarStreamWithMeta,
@@ -287,21 +288,22 @@ export class ClaudeAgent implements INodeType {
 				const trySidecar = sessionRuntime === 'sidecar' && Boolean(params.sessionId);
 				if (trySidecar) {
 					try {
-						const sidecarBody: SidecarMessageRequest = {
-							chatInput: params.chatInput.trim(),
-							imageUrls,
-							systemMessage: params.systemMessage,
-							modelConfig,
-							params,
-							useClaudeCodePreset: params.useClaudeCodePreset,
-							cwd,
-							additionalDirectories,
-							mcpServers,
-							mcpServerNames,
-							mcpDisallowedSdk,
-							mcpAllowedSdk,
-							mcpPreApproved,
-						};
+					const sidecarBody: SidecarMessageRequest = {
+						chatInput: params.chatInput.trim(),
+						imageUrls,
+						systemMessage: params.systemMessage,
+						modelConfig,
+						params,
+						useClaudeCodePreset: params.useClaudeCodePreset,
+						cwd,
+						additionalDirectories,
+						mcpServers,
+						mcpServerNames,
+						mcpDisallowedSdk,
+						mcpAllowedSdk,
+						mcpPreApproved,
+						contextWindowSize: params.contextWindowSize || undefined,
+					};
 						const abortSignal = this.getExecutionCancelSignal?.();
 						const stream = await postSidecarMessage(
 							params.sidecarUrl,
@@ -356,6 +358,24 @@ export class ClaudeAgent implements INodeType {
 					const sdkSuggestions = assembler.getSdkSuggestions();
 					if (sdkSuggestions.length) suggestions = sdkSuggestions;
 					refusalMessage = assembler.getRefusalMessage();
+				}
+
+				usage = assembler.getUsage() ?? usage;
+				if (
+					this.isStreaming()
+					&& usage
+					&& ((usage.inputTokens ?? 0) > 0 || (usage.outputTokens ?? 0) > 0)
+				) {
+					await this.sendChunk(
+						'item',
+						itemIndex,
+						encodeClaudeStreamPayload({
+							kind: 'usage',
+							inputTokens: usage.inputTokens,
+							outputTokens: usage.outputTokens,
+							costUsd: usage.costUsd,
+						}),
+					);
 				}
 
 				await assembler.end();

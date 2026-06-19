@@ -39,12 +39,14 @@ export class SidecarStreamSink {
 
 	async finish(meta: Omit<SidecarDoneMeta, 'output' | 'textOutput' | 'usage'> & {
 		claudeSessionId?: string;
+		outputOverride?: string;
 	}): Promise<void> {
 		if (this.ended) return;
 		this.ended = true;
+		const outputText = meta.outputOverride !== undefined ? meta.outputOverride : this.assembler.getOutput();
 		const done: SidecarDoneMeta = {
-			output: this.assembler.getOutput(),
-			textOutput: this.assembler.getTextOutput(),
+			output: outputText,
+			textOutput: meta.outputOverride !== undefined ? meta.outputOverride : this.assembler.getTextOutput(),
 			usage: this.assembler.getUsage(),
 			claudeSessionId: meta.claudeSessionId ?? this.assembler.getSessionId(),
 			sessionContinuation: meta.sessionContinuation,

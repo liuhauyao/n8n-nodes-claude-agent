@@ -35,6 +35,11 @@ type TurnWaiter = {
 	reject: (error: Error) => void;
 };
 
+/** 判断错误消息是否为 ContextWindowExceeded */
+function isContextWindowExceeded(msg: string): boolean {
+	return /context.?window.?exceed|prompt is too long|max.?context.?length|ContextWindowExceeded/i.test(msg);
+}
+
 class LiveSession {
 	readonly businessSessionId: string;
 	readonly inputQueue: MessageQueue;
@@ -49,6 +54,16 @@ class LiveSession {
 	currentTurnBuffer = '';
 	/** 当前会话的 MCP 工具拒绝列表（每轮消息更新，通过 applyFlagSettings 生效） */
 	currentMcpDisallowedSdk: string[] = [];
+	/** 累计会话 input+output tokens，用于主动 compact 阈值判断 */
+	cumulativeTokens = 0;
+	/** 上下文窗口大小（tokens），0 表示未知，由 SidecarMessageRequest 传入 */
+	contextWindowSize = 0;
+	/** 本轮是否已推送 /compact 等待结果 */
+	compactRetried = false;
+	/** 本 session 是否已尝试过 /compact（防止无限循环） */
+	compactAttempted = false;
+	/** compact 完成后待重发的原始 chatInput */
+	pendingChatInput = '';
 	private turnWaiter?: TurnWaiter;
 	private closed = false;
 
@@ -241,7 +256,23 @@ export class SessionManager {
 			});
 		}
 
-		live.pushUserMessage(req.chatInput, req.imageUrls ?? []);
+		// 同步上下文窗口大小（每次消息更新，支持运行时调整）
+		if (req.contextWindowSize && req.contextWindowSize > 0) {
+			live.contextWindowSize = req.contextWindowSize;
+		}
+
+		// 方向 B：累计 tokens 超阈值时提前 /compact，避免到达硬限制
+		const cwThreshold = live.contextWindowSize > 0
+			? live.contextWindowSize * 0.85
+			: 200_000;
+		if (live.cumulativeTokens > cwThreshold && !live.compactAttempted) {
+			live.compactAttempted = true;
+			live.compactRetried = true;
+			live.pendingChatInput = req.chatInput;
+			live.pushUserMessage('/compact');
+		} else {
+			live.pushUserMessage(req.chatInput, req.imageUrls ?? []);
+		}
 		await live.waitForTurn(this.config.messageTimeoutMs);
 
 		const claudeSessionId = live.claudeSessionId ?? stored?.claudeSessionId;
@@ -417,6 +448,11 @@ export class SessionManager {
 					live.claudeSessionId = record.session_id;
 				}
 			if (record.type === 'result') {
+				// 累积会话 tokens（供方向 B 阈值判断）
+				const usageRecord = record.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+				if (usageRecord) {
+					live.cumulativeTokens += (usageRecord.input_tokens ?? 0) + (usageRecord.output_tokens ?? 0);
+				}
 				// 每轮结束后重置 hook 计数器，避免跨轮次累加
 				if (live.hookRuntimeState) {
 					live.hookRuntimeState.toolCallCount = 0;
@@ -424,10 +460,44 @@ export class SessionManager {
 					live.hookRuntimeState.postToolLogs = [];
 				}
 				if (record.subtype === 'error') {
-					const err = String(record.result ?? 'Claude agent run failed');
-					live.completeTurn(err);
-					await sink?.fail(err);
+					const errMsg = String(record.result ?? 'Claude agent run failed');
+					if (isContextWindowExceeded(errMsg)) {
+						if (!live.compactAttempted) {
+							// 首次上下文溢出：推送 /compact，不通知等待方，继续消费
+							live.compactAttempted = true;
+							live.compactRetried = true;
+							live.currentTurnBuffer = '';
+							live.pushUserMessage('/compact');
+							continue;
+						}
+						// /compact 后仍溢出：返回友好文案作为正常 output，不扣费
+						const friendlyMsg = '很抱歉，当前会话的对话上下文已全部用完。您的灵感与世界设定都已保存在持久记忆中，请新建对话继续创作。';
+						await sink?.emit({ kind: 'status', phase: 'context_exhausted' });
+						await sink?.emit({ kind: 'text', text: friendlyMsg });
+						await sink?.finish({
+							claudeSessionId: live.claudeSessionId,
+							sessionContinuation: 'context_exhausted',
+							sessionRuntime: 'sidecar',
+							outputOverride: friendlyMsg,
+						});
+						live.pendingChatInput = '';
+						live.compactRetried = false;
+						live.completeTurn();
+						return;
+					}
+					live.completeTurn(errMsg);
+					await sink?.fail(errMsg);
 				} else {
+					// success
+					if (live.compactRetried && live.pendingChatInput) {
+						// /compact 成功：重发原始消息，不结束等待
+						const pendingInput = live.pendingChatInput;
+						live.pendingChatInput = '';
+						live.compactRetried = false;
+						live.currentTurnBuffer = '';
+						live.pushUserMessage(pendingInput);
+						continue;
+					}
 					live.completeTurn();
 				}
 			}

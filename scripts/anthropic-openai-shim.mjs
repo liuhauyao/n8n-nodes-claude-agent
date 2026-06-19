@@ -68,6 +68,41 @@ function mapStopReason(finishReason) {
 	}
 }
 
+/** 从 OpenAI Chat Completions 响应或 SSE chunk 提取 token 用量 */
+function extractOpenAiUsage(raw) {
+	if (!raw || typeof raw !== 'object') return null;
+	const usage = raw.usage;
+	if (!usage || typeof usage !== 'object') return null;
+
+	const input =
+		usage.prompt_tokens ??
+		usage.input_tokens ??
+		usage.promptTokens ??
+		usage.inputTokens;
+	const output =
+		usage.completion_tokens ??
+		usage.output_tokens ??
+		usage.completionTokens ??
+		usage.outputTokens;
+
+	if (typeof input !== 'number' && typeof output !== 'number') return null;
+
+	return {
+		input_tokens: typeof input === 'number' ? input : 0,
+		output_tokens: typeof output === 'number' ? output : 0,
+	};
+}
+
+/** 流式 chunk 可能重复上报，取较大值作为累计量 */
+function mergeStreamUsage(current, next) {
+	if (!next) return current;
+	if (!current) return { ...next };
+	return {
+		input_tokens: Math.max(current.input_tokens, next.input_tokens),
+		output_tokens: Math.max(current.output_tokens, next.output_tokens),
+	};
+}
+
 function openAiToAnthropicResponse(openAiBody, model) {
 	const choice = openAiBody.choices?.[0] ?? {};
 	const message = choice.message ?? {};
@@ -142,6 +177,7 @@ async function pipeOpenAiStreamToAnthropic(upstreamRes, res, model) {
 
 	const reader = Readable.fromWeb(upstreamRes.body);
 	let buffer = '';
+	let streamUsage = null;
 
 	for await (const chunk of reader) {
 		buffer += chunk.toString('utf8');
@@ -160,17 +196,23 @@ async function pipeOpenAiStreamToAnthropic(upstreamRes, res, model) {
 				continue;
 			}
 
+			streamUsage = mergeStreamUsage(streamUsage, extractOpenAiUsage(parsed));
+
 			const delta = parsed.choices?.[0]?.delta ?? {};
 			translator.processDelta(delta);
 		}
 	}
 
 	const stopReason = translator.finish();
+	const finalUsage = streamUsage ?? { input_tokens: 0, output_tokens: 0 };
 	res.write(
 		sseEvent('message_delta', {
 			type: 'message_delta',
 			delta: { stop_reason: stopReason, stop_sequence: null },
-			usage: { output_tokens: 0 },
+			usage: {
+				input_tokens: finalUsage.input_tokens,
+				output_tokens: finalUsage.output_tokens,
+			},
 		}),
 	);
 	res.write(sseEvent('message_stop', { type: 'message_stop' }));

@@ -180,6 +180,13 @@ export const CLAUDE_AGENT_OPTIONS_PROPERTY: INodeProperties = {
 					default: false,
 					description: 'Include subagent text output in the main stream when using subagents',
 				},
+				{
+					displayName: 'Context Window Size (tokens)',
+					name: 'contextWindowSize',
+					type: 'number',
+					default: 0,
+					description: 'Model context window size in tokens. Set to match the model configured in Admin → AI Model. Used for proactive compaction (Direction B, triggers at 85%) and reactive compaction (Direction A). 0 = disabled.',
+				},
 			],
 		},
 		{

@@ -17,6 +17,8 @@ export interface SidecarMessageRequest {
 	mcpDisallowedSdk: string[];
 	mcpAllowedSdk: string[];
 	mcpPreApproved: string[];
+	/** 模型上下文窗口大小（tokens），0 或 undefined 表示未配置，由后管 AI 模型配置传入 */
+	contextWindowSize?: number;
 }
 
 export interface SidecarMessageResponseMeta {

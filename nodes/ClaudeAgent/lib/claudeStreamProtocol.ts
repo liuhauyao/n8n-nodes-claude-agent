@@ -13,7 +13,8 @@ export type ClaudeStreamPayload =
 	| { kind: 'structured'; data: unknown }
 	| { kind: 'suggestions'; items: string[] }
 	| { kind: 'model_switch'; trigger?: string }
-	| { kind: 'refusal'; message?: string };
+	| { kind: 'refusal'; message?: string }
+	| { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number };
 
 export function encodeClaudeStreamPayload(payload: ClaudeStreamPayload): string {
 	return JSON.stringify({ [CLAUDE_STREAM_MARKER]: payload });

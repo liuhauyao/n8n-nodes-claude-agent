@@ -40,6 +40,8 @@ export interface ClaudeAgentRunParams {
 	subagentsEnabled: boolean;
 	subagentsJson: string;
 	primaryAgentJson: string;
+	/** 模型上下文窗口大小（tokens），0 表示未配置 */
+	contextWindowSize: number;
 }
 
 function readSettingSources(raw: string | string[] | undefined): SettingSource[] {
@@ -165,6 +167,7 @@ export function readClaudeAgentRunParams(
 	const maxThinkingTokens = Number(agentBehavior.maxThinkingTokens ?? 10000);
 	const maxBudgetUsd = Number(agentBehavior.maxBudgetUsd ?? 0);
 	const forwardSubagentText = agentBehavior.forwardSubagentText === true;
+	const contextWindowSize = Number(agentBehavior.contextWindowSize ?? 0);
 	const outputFormatSchema = pickString(outputOpts.outputFormatSchema);
 	const outputFormatName = pickString(outputOpts.outputFormatName) || 'output';
 	const toolSearchModeRaw = pickString(outputOpts.toolSearchMode) || 'unset';
@@ -205,6 +208,7 @@ export function readClaudeAgentRunParams(
 		subagentsEnabled,
 		subagentsJson,
 		primaryAgentJson,
+		contextWindowSize,
 	};
 }
 

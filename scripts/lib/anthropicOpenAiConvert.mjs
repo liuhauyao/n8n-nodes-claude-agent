@@ -159,6 +159,9 @@ export function anthropicToOpenAiRequest(body) {
 	if (tools) openAi.tools = tools;
 	if (typeof body.temperature === 'number') openAi.temperature = body.temperature;
 	if (typeof body.top_p === 'number') openAi.top_p = body.top_p;
+	if (openAi.stream) {
+		openAi.stream_options = { include_usage: true };
+	}
 
 	const thinkingExtras = anthropicThinkingToOpenAiExtras(body.thinking);
 	if (thinkingExtras.chat_template_kwargs) {

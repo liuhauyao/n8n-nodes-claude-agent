@@ -31,6 +31,7 @@ export class ClaudeStreamAssembler {
 	private structuredOutput?: unknown;
 	private sdkSuggestions: string[] = [];
 	private refusalMessage?: string;
+	private readonly stepUsageByMessageId = new Map<string, { input: number; output: number }>();
 
 	constructor(private readonly sink: StreamSink) {}
 
@@ -173,6 +174,8 @@ export class ClaudeStreamAssembler {
 			if (this.completedAssistantMessages > 0) {
 				this.beginNewAssistantMarkdownRound();
 			}
+			const message = evt.message as Record<string, unknown> | undefined;
+			this.recordStepUsageFromAnthropicMessage(message);
 			return;
 		}
 
@@ -231,6 +234,7 @@ export class ClaudeStreamAssembler {
 		this.completedAssistantMessages++;
 
 		const message = record.message as Record<string, unknown> | undefined;
+		this.recordStepUsageFromAnthropicMessage(message);
 		const content = message?.content;
 		if (!Array.isArray(content)) return;
 		for (const block of content) {
@@ -307,18 +311,75 @@ export class ClaudeStreamAssembler {
 			await this.emit({ kind: 'status', phase: 'refusal', message: this.refusalMessage });
 		}
 		const usage = record.usage as Record<string, unknown> | undefined;
-		if (usage) {
-			this.usage = {
-				inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined,
-				outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined,
-				costUsd: typeof record.total_cost_usd === 'number' ? record.total_cost_usd : undefined,
-			};
+		const resolvedUsage = this.resolveUsageFromResult(usage, record.total_cost_usd);
+		if (resolvedUsage) {
+			this.usage = resolvedUsage;
+			await this.emit({
+				kind: 'usage',
+				inputTokens: resolvedUsage.inputTokens,
+				outputTokens: resolvedUsage.outputTokens,
+				costUsd: resolvedUsage.costUsd,
+			});
 		}
 		if (record.subtype === 'success') {
 			await this.emit({ kind: 'status', phase: 'success', message: 'completed' });
 		} else if (record.subtype === 'error') {
 			await this.emit({ kind: 'status', phase: 'error', message: String(record.result ?? 'error') });
 		}
+	}
+
+	private recordStepUsageFromAnthropicMessage(message?: Record<string, unknown>): void {
+		if (!message || typeof message !== 'object') return;
+		const msgId = typeof message.id === 'string' ? message.id : undefined;
+		const usage = message.usage as Record<string, unknown> | undefined;
+		if (!msgId || !usage) return;
+
+		const input = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+		const output = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
+		if (input <= 0 && output <= 0) return;
+
+		this.stepUsageByMessageId.set(msgId, { input, output });
+	}
+
+	private aggregateStepUsageFallback(): { inputTokens: number; outputTokens: number } | undefined {
+		if (this.stepUsageByMessageId.size === 0) return undefined;
+
+		let inputTokens = 0;
+		let outputTokens = 0;
+		for (const step of this.stepUsageByMessageId.values()) {
+			inputTokens += step.input;
+			outputTokens += step.output;
+		}
+		if (inputTokens <= 0 && outputTokens <= 0) return undefined;
+		return { inputTokens, outputTokens };
+	}
+
+	private resolveUsageFromResult(
+		usage: Record<string, unknown> | undefined,
+		totalCostUsd: unknown,
+	): ClaudeMessageMeta['usage'] | undefined {
+		const costUsd = typeof totalCostUsd === 'number' ? totalCostUsd : undefined;
+
+		if (usage) {
+			const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined;
+			const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined;
+			const hasNonZero = (inputTokens ?? 0) > 0 || (outputTokens ?? 0) > 0;
+			if (hasNonZero) {
+				return { inputTokens, outputTokens, costUsd };
+			}
+		}
+
+		const fallback = this.aggregateStepUsageFallback();
+		if (fallback) {
+			return { ...fallback, costUsd };
+		}
+
+		if (!usage) return undefined;
+
+		const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined;
+		const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined;
+		if (inputTokens === undefined && outputTokens === undefined) return undefined;
+		return { inputTokens, outputTokens, costUsd };
 	}
 
 	private async emit(payload: ClaudeStreamPayload): Promise<void> {
