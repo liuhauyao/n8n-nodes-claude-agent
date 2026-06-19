@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-claude-sdk-agent",
-  "version": "1.7.4",
+  "version": "1.7.5",
   "description": "n8n community nodes — Claude Agent SDK with Model Selector, Provider credentials, streaming, MCP and skills.",
   "keywords": [
     "n8n-community-node-package",
@@ -28,7 +28,7 @@
   "main": "dist/nodes/ClaudeAgent/ClaudeAgent.node.js",
   "scripts": {
     "build": "tsc && npm run copy-assets",
-    "prepack": "npm run build",
+    "prepack": "npm run build:sidecar",
     "copy-assets": "copyfiles \"nodes/**/*.svg\" \"credentials/*.svg\" dist/",
     "verify": "npm run build && eslint dist && node scripts/lint-package-json.mjs",
     "lint": "eslint dist && node scripts/lint-package-json.mjs",
