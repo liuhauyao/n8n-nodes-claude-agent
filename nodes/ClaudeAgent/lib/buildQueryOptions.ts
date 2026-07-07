@@ -12,10 +12,15 @@ import {
 	resolveClaudeMcpPreApprovedTools,
 } from './mcpToolAccess';
 import { applyToolSearchEnv, buildOutputFormatOption, parseJsonObject } from './parseExtendedOptions';
-import { mergeDisallowedTools, PERMISSION_PRESETS, resolvePermissionPreset } from './permissionPresets';
+import { buildUtf8GuardCanUseTool } from './utf8ReplacementGuard';
+import {
+	mergeDisallowedTools,
+	PERMISSION_PRESETS,
+	resolvePermissionPreset,
+	resolveQueryPermissionMode,
+} from './permissionPresets';
 import type { ToolSearchMode } from './readNodeParameters';
 import type { SessionContinuation } from './sessionContinuation';
-import { buildUtf8GuardCanUseTool } from './utf8ReplacementGuard';
 
 type SettingSource = 'user' | 'project' | 'local' | 'team' | 'plugins';
 
@@ -55,10 +60,6 @@ export function applySystemPromptToOptions(
 	queryOptions: Record<string, unknown>,
 	input: Pick<BuildQueryOptionsInput, 'continuation' | 'systemMessage' | 'useClaudeCodePreset'>,
 ): void {
-	// 无论 new / resume / fork 均需注入：
-	// 我们使用的 anthropic-openai-shim 完全无状态，每次 API 调用都必须携带 system 字段；
-	// CLI 的 session JSONL 文件只存储对话历史，不持久化 systemPrompt。
-	// resume 时不注入会导致 API 请求缺少 system 字段，模型退回为无角色默认行为。
 	const systemMessage = input.systemMessage?.trim() ?? '';
 	if (input.useClaudeCodePreset) {
 		queryOptions.systemPrompt = systemMessage
@@ -141,11 +142,8 @@ export function buildQueryOptions(input: BuildQueryOptionsInput): Record<string,
 				],
 			}
 			: {}),
-		disallowedTools: mergeDisallowedTools([
-			...(preset.disallowedTools ?? []),
-			...input.mcpDisallowedSdk,
-		]),
-		...(preset.permissionMode ? { permissionMode: preset.permissionMode } : {}),
+		disallowedTools: mergeDisallowedTools(preset.disallowedTools ?? []),
+		...resolveQueryPermissionMode(preset.permissionMode),
 		...(preset.allowDangerouslySkipPermissions
 			? { allowDangerouslySkipPermissions: true }
 			: {}),

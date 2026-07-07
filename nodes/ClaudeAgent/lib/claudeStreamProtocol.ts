@@ -1,6 +1,19 @@
 /** n8n item.content JSON envelope for Claude-native stream events. */
 export const CLAUDE_STREAM_MARKER = '__claude__';
 
+/**
+ * 用户作业规划项（SDK TaskCreate/TaskUpdate 映射）。
+ * 与灵感助手「强制开工顺序」无关——仅复杂多步业务诉求时 Agent 才会创建，
+ * 供前端 Queue 组件渲染为用户可见的任务清单，不代表 Harness 内部流程。
+ */
+export interface AgentTaskItem {
+	id: string;
+	subject: string;
+	description?: string;
+	status: 'pending' | 'in_progress' | 'completed' | 'deleted';
+	activeForm?: string;
+}
+
 export type ClaudeStreamPayload =
 	| { kind: 'tool_start'; callId: string; name: string; label: string }
 	| { kind: 'tool_end'; callId: string; ok?: boolean; error?: string }
@@ -12,6 +25,7 @@ export type ClaudeStreamPayload =
 	| { kind: 'session'; sessionId: string }
 	| { kind: 'structured'; data: unknown }
 	| { kind: 'suggestions'; items: string[] }
+	| { kind: 'task_snapshot'; tasks: AgentTaskItem[] }
 	| { kind: 'model_switch'; trigger?: string }
 	| { kind: 'refusal'; message?: string }
 	| { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number };
@@ -51,6 +65,8 @@ export interface ClaudeMessageMeta {
 	usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
 	sessionId?: string;
 	suggestions?: string[];
+	/** 用户作业规划（Task），仅复杂任务存在；空则前端不渲染 Queue */
+	agentTasks?: AgentTaskItem[];
 }
 
 const CLAUDE_META_RE = /<claude_meta>[\s\S]*?<\/claude_meta>/i;
@@ -102,6 +118,7 @@ export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta
 	const hasUsage = !!meta.usage;
 	const hasSession = !!meta.sessionId;
 	const hasSuggestions = !!meta.suggestions?.length;
+	const hasAgentTasks = !!meta.agentTasks?.length;
 	if (
 		!hasTools
 		&& !hasTimeline
@@ -110,6 +127,7 @@ export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta
 		&& !hasUsage
 		&& !hasSession
 		&& !hasSuggestions
+		&& !hasAgentTasks
 	) {
 		return clean;
 	}
@@ -123,5 +141,6 @@ export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta
 	if (hasUsage) payload.usage = meta.usage;
 	if (hasSession) payload.sessionId = meta.sessionId;
 	if (hasSuggestions) payload.suggestions = meta.suggestions;
+	if (hasAgentTasks) payload.agentTasks = meta.agentTasks;
 	return `${clean}\n<claude_meta>${JSON.stringify(payload)}</claude_meta>`;
 }

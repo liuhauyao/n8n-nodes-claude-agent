@@ -1,5 +1,10 @@
 /** 声明式 Hooks JSON → SDK programmatic hooks（无 eval） */
 import type { HookCallbackMatcher, HookEvent, HookInput, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
+import {
+	bareToolName,
+	extractTaskIdFromToolPayload,
+	mapSdkTaskStatus,
+} from './taskToolUtils';
 
 export interface DeclarativePreToolUseConfig {
 	maxCallsPerTurn?: number;
@@ -10,15 +15,44 @@ export interface DeclarativePostToolUseConfig {
 	logToOutput?: boolean;
 }
 
+/**
+ * Stop Hook：headless 场景下用作输出前的硬性质量门（等价 CLI `/goal` 的确定性版本，
+ * 不额外调用评估模型）。仅做规则可判定的检查——不判断记忆是否该写（那属于 Agent
+ * 自身的主观判断，见 SKILL「写入检查」），只判断已发生的客观事实：
+ * - 本轮是否有 MCP 写工具成功却缺 `<proposal_created>`
+ * - 正文是否缺 `<next>` 建议
+ * - 若本轮建立了「作业规划」Task，是否全部 completed
+ */
+export interface DeclarativeStopHookConfig {
+	enabled?: boolean;
+	/** 连续 block 上限，避免死循环（参考 Claude Code /goal 8 次上限，headless 建议更小） */
+	maxBlocks?: number;
+	/** 正文缺 `<next>` 时是否 block */
+	requireNextTag?: boolean;
+	/** 命中 proposalWriteTools 成功调用后，正文缺 `<proposal_created` 时是否 block */
+	requireProposalCreatedOnToolSuccess?: boolean;
+	/** 触发 requireProposalCreatedOnToolSuccess 的工具名（裸名或前缀通配，如 'create*'） */
+	proposalWriteTools?: string[];
+	/** 若本轮存在 Task 作业规划，是否要求全部 completed 才允许结束 */
+	requireAllTasksCompleted?: boolean;
+}
+
 export interface DeclarativeHooksConfig {
 	preToolUse?: DeclarativePreToolUseConfig;
 	postToolUse?: DeclarativePostToolUseConfig;
+	stopHook?: DeclarativeStopHookConfig;
 }
 
 export interface HookRuntimeState {
 	toolCallCount: number;
 	perToolCounts: Map<string, number>;
 	postToolLogs: Array<{ tool: string; ok: boolean; error?: string }>;
+	/** 本轮成功执行过的工具裸名集合（供 Stop Hook 判定 proposal_created 是否遗漏） */
+	postToolSuccessNames: Set<string>;
+	/** 本轮 Task 作业规划状态（taskId → status），供 Stop Hook 判定是否全部完成 */
+	taskStatusById: Map<string, string>;
+	/** Stop Hook 已连续 block 次数，达到 maxBlocks 后放行避免死循环 */
+	stopBlockCount: number;
 }
 
 export function parseHooksJson(raw: string | undefined): DeclarativeHooksConfig | undefined {
@@ -38,14 +72,27 @@ export function createHookRuntimeState(): HookRuntimeState {
 		toolCallCount: 0,
 		perToolCounts: new Map(),
 		postToolLogs: [],
+		postToolSuccessNames: new Set(),
+		taskStatusById: new Map(),
+		stopBlockCount: 0,
 	};
+}
+
+/** 重置每轮（每条用户消息对应的一次 query 结果）的 Hook 运行态，避免跨轮累加 */
+export function resetHookRuntimeStateForNextTurn(state: HookRuntimeState): void {
+	state.toolCallCount = 0;
+	state.perToolCounts = new Map();
+	state.postToolLogs = [];
+	state.postToolSuccessNames = new Set();
+	state.taskStatusById = new Map();
+	state.stopBlockCount = 0;
 }
 
 export function buildDeclarativeHooks(
 	config: DeclarativeHooksConfig | undefined,
 	state: HookRuntimeState,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> | undefined {
-	if (!config?.preToolUse && !config?.postToolUse) return undefined;
+	if (!config?.preToolUse && !config?.postToolUse && !config?.stopHook?.enabled) return undefined;
 
 	const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {};
 	const preConfig = config.preToolUse;
@@ -101,16 +148,96 @@ export function buildDeclarativeHooks(
 		];
 	}
 
-	if (config.postToolUse?.logToOutput) {
+	// PostToolUse：既承载既有 logToOutput 日志，也为 Stop Hook 累积「工具是否成功」
+	// 「Task 是否全部完成」两类事实依据，因此只要 stopHook 启用也需要挂载。
+	if (config.postToolUse || config.stopHook?.enabled) {
 		hooks.PostToolUse = [
 			{
 				hooks: [
 					async (input: HookInput): Promise<HookJSONOutput> => {
-						state.postToolLogs.push({
-							tool: String((input as { tool_name?: unknown }).tool_name ?? ''),
-							ok: true,
-						});
+						const toolName = String((input as { tool_name?: unknown }).tool_name ?? '');
+						const bareName = bareToolName(toolName);
+						state.postToolSuccessNames.add(bareName);
+
+						if (bareName === 'TaskCreate') {
+							const realId = extractTaskIdFromToolPayload(
+								(input as { tool_response?: unknown }).tool_response,
+							);
+							if (realId) state.taskStatusById.set(realId, 'pending');
+						} else if (bareName === 'TaskUpdate') {
+							const toolInput = (input as { tool_input?: unknown }).tool_input;
+							if (toolInput && typeof toolInput === 'object') {
+								const obj = toolInput as Record<string, unknown>;
+								const taskId = (obj.taskId ?? obj.id ?? obj.task_id) as string | undefined;
+								const status = mapSdkTaskStatus(typeof obj.status === 'string' ? obj.status : undefined);
+								if (taskId && status) {
+									if (status === 'deleted') state.taskStatusById.delete(taskId);
+									else state.taskStatusById.set(taskId, status);
+								}
+							}
+						}
+
+						if (config.postToolUse?.logToOutput) {
+							state.postToolLogs.push({ tool: toolName, ok: true });
+						}
 						return {};
+					},
+				],
+			},
+		];
+	}
+
+	if (config.stopHook?.enabled) {
+		const stopConfig = config.stopHook;
+		const maxBlocks = typeof stopConfig.maxBlocks === 'number' && stopConfig.maxBlocks > 0
+			? stopConfig.maxBlocks
+			: 3;
+		const proposalWriteTools = stopConfig.proposalWriteTools ?? [];
+
+		hooks.Stop = [
+			{
+				hooks: [
+					async (input: HookInput): Promise<HookJSONOutput> => {
+						const stopInput = input as { last_assistant_message?: string };
+						const lastMessage = stopInput.last_assistant_message ?? '';
+						const reasons: string[] = [];
+
+						if (stopConfig.requireNextTag && !/<next>/i.test(lastMessage)) {
+							reasons.push('正文缺少 <next> 快捷建议，请在末尾补充 2-4 条');
+						}
+
+						if (stopConfig.requireProposalCreatedOnToolSuccess && proposalWriteTools.length > 0) {
+							const hasProposalWriteSuccess = [...state.postToolSuccessNames].some((name) =>
+								proposalWriteTools.some((pattern) => matchesToolPattern(name, pattern)),
+							);
+							if (hasProposalWriteSuccess && !/<proposal_created/i.test(lastMessage)) {
+								reasons.push('本轮已成功执行创改删工具，但正文缺少 <proposal_created> 标记');
+							}
+						}
+
+						if (stopConfig.requireAllTasksCompleted && state.taskStatusById.size > 0) {
+							const incomplete = [...state.taskStatusById.values()].some(
+								(status) => status !== 'completed',
+							);
+							if (incomplete) {
+								reasons.push('本轮建立的作业规划（Task）尚未全部标记为 completed');
+							}
+						}
+
+						if (reasons.length === 0) return {};
+
+						if (state.stopBlockCount >= maxBlocks) {
+							// 达到 block 上限，放行避免死循环；问题留给下一轮或人工介入
+							return {};
+						}
+						state.stopBlockCount += 1;
+
+						return {
+							hookSpecificOutput: {
+								hookEventName: 'Stop',
+								additionalContext: reasons.join('；') + '。请补齐后再结束本轮回复。',
+							},
+						};
 					},
 				],
 			},

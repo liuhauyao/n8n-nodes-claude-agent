@@ -239,7 +239,13 @@ export const CLAUDE_AGENT_OPTIONS_PROPERTY: INodeProperties = {
 					typeOptions: { rows: 8 },
 					default: '',
 					description:
-						'Declarative hooks config. Example: {"preToolUse":{"maxCallsPerTurn":20,"perToolMaxCalls":{"mcp__server__tool":3}}}',
+						'Declarative hooks config. preToolUse/postToolUse: rate limits + logging. ' +
+						'stopHook: deterministic output-quality gate (headless equivalent of CLI /goal) — ' +
+						'blocks turn completion via additionalContext until checks pass or maxBlocks is hit. Example: ' +
+						'{"postToolUse":{"logToOutput":true},"stopHook":{"enabled":true,"maxBlocks":3,' +
+						'"requireNextTag":true,"requireProposalCreatedOnToolSuccess":true,' +
+						'"proposalWriteTools":["createDefinitionProposal","updateDefinitionProposal"],' +
+						'"requireAllTasksCompleted":true}}',
 				},
 			],
 		},

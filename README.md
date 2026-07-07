@@ -219,7 +219,7 @@ Streaming output uses `__claude__` JSON chunks.
 
 | Field | Description |
 |-------|-------------|
-| `output` | Full response body: Markdown (including `<next>` blocks) + `<claude_meta>` (toolCalls / timeline / suggestions) |
+| `output` | Full response body: Markdown (including `<next>` blocks) + `<claude_meta>` (toolCalls / timeline / suggestions / agentTasks) |
 | `textOutput` | Plain Markdown only (no `<next>`, no `<claude_meta>`); suitable for passing directly to downstream nodes |
 | `claudeSessionId` | Claude SDK session id |
 | `sessionContinuation` | `new` / `resume` / `fork` / `setModel` — how this turn continued the SDK session |

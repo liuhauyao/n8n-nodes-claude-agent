@@ -41,6 +41,7 @@ import {
 	postSidecarMessage,
 	type SidecarMessageRequest,
 } from './lib/sidecarClient';
+import type { SidecarDoneMeta } from './lib/sidecarTypes';
 import { resolvePermissionPreset } from './lib/permissionPresets';
 import { pickExtendedQueryFields } from './lib/extendedQueryFields';
 import {
@@ -186,9 +187,10 @@ export class ClaudeAgent implements INodeType {
 					| 'fromCredential'
 					| 'fromInput';
 				const params = readClaudeAgentRunParams(this, itemIndex);
-				const imageUrls = normalizeImageUrls(itemJson.imageUrls, params.chatInput);
+				const effectiveChatInput = params.chatInput;
+				const imageUrls = normalizeImageUrls(itemJson.imageUrls, effectiveChatInput);
 
-				if (!hasUserTurnContent(params.chatInput, imageUrls)) {
+				if (!hasUserTurnContent(effectiveChatInput, imageUrls)) {
 					throw new NodeOperationError(this.getNode(), 'User message (chatInput) is empty', { itemIndex });
 				}
 
@@ -236,7 +238,8 @@ export class ClaudeAgent implements INodeType {
 				);
 
 				const onStructured = async (jsonContent: string) => {
-					if (this.isStreaming()) await this.sendChunk('item', itemIndex, jsonContent);
+					if (!this.isStreaming()) return;
+					await this.sendChunk('item', itemIndex, jsonContent);
 				};
 
 				const assembler = new ClaudeStreamAssembler({
@@ -284,12 +287,13 @@ export class ClaudeAgent implements INodeType {
 				let structuredOutput: unknown;
 				let suggestions: string[] | undefined;
 				let refusalMessage: string | undefined;
+				let doneMeta: SidecarDoneMeta | undefined;
 
 				const trySidecar = sessionRuntime === 'sidecar' && Boolean(params.sessionId);
 				if (trySidecar) {
 					try {
 					const sidecarBody: SidecarMessageRequest = {
-						chatInput: params.chatInput.trim(),
+						chatInput: effectiveChatInput.trim(),
 						imageUrls,
 						systemMessage: params.systemMessage,
 						modelConfig,
@@ -311,7 +315,7 @@ export class ClaudeAgent implements INodeType {
 							sidecarBody,
 							abortSignal ?? undefined,
 						);
-						const doneMeta = await consumeSidecarStreamWithMeta(stream, onStructured);
+						doneMeta = await consumeSidecarStreamWithMeta(stream, onStructured);
 						sessionRuntime = 'sidecar';
 						if (doneMeta) {
 							output = doneMeta.output;
@@ -333,7 +337,7 @@ export class ClaudeAgent implements INodeType {
 					const turn = await runStatelessTurn({
 						...queryInputBase,
 						queryFn,
-						chatInput: params.chatInput.trim(),
+						chatInput: effectiveChatInput.trim(),
 						imageUrls,
 						storedSession,
 						assembler,
@@ -403,7 +407,7 @@ export class ClaudeAgent implements INodeType {
 						provider: modelConfig.providerType,
 						profileName: modelConfig.profileName,
 						claudeSessionId,
-						sessionId: params.sessionId || undefined,
+						sessionId: params.sessionId || itemJson.sessionId || undefined,
 						sessionContinuation,
 						sessionRuntime,
 						previousClaudeSessionId,

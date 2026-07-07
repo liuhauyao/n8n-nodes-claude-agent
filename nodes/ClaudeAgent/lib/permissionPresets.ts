@@ -70,3 +70,10 @@ export function resolvePermissionPreset(raw: string): keyof typeof PERMISSION_PR
 	}
 	return 'customer_service';
 }
+
+export function resolveQueryPermissionMode(
+	presetMode: string | undefined,
+): { permissionMode?: string } {
+	if (!presetMode) return {};
+	return { permissionMode: presetMode };
+}

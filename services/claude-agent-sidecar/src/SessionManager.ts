@@ -3,7 +3,7 @@ import type { Query } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeModelConfig, StoredSessionRecord } from '../../../dist/nodes/shared/lib/types';
 import { modelConfigSummary } from '../../../dist/nodes/shared/lib/resolveModelConfig';
 import { buildQueryOptions, getHookRuntimeState } from '../../../dist/nodes/ClaudeAgent/lib/buildQueryOptions';
-import type { HookRuntimeState } from '../../../dist/nodes/ClaudeAgent/lib/buildDeclarativeHooks';
+import { resetHookRuntimeStateForNextTurn, type HookRuntimeState } from '../../../dist/nodes/ClaudeAgent/lib/buildDeclarativeHooks';
 import { pickExtendedQueryFields } from '../../../dist/nodes/ClaudeAgent/lib/extendedQueryFields';
 import { sanitizeQueryOptionsForSdk } from '../../../dist/nodes/ClaudeAgent/lib/queryOptionsSanitize';
 import { loadClaudeSdk } from '../../../dist/nodes/ClaudeAgent/lib/loadClaudeSdk';
@@ -135,6 +135,7 @@ class LiveSession {
 			// ignore
 		}
 	}
+
 }
 
 export class SessionManager {
@@ -453,11 +454,9 @@ export class SessionManager {
 				if (usageRecord) {
 					live.cumulativeTokens += (usageRecord.input_tokens ?? 0) + (usageRecord.output_tokens ?? 0);
 				}
-				// 每轮结束后重置 hook 计数器，避免跨轮次累加
+				// 每轮结束后重置 hook 运行态，避免跨轮次累加（含 Stop Hook 的工具成功/Task 状态追踪）
 				if (live.hookRuntimeState) {
-					live.hookRuntimeState.toolCallCount = 0;
-					live.hookRuntimeState.perToolCounts = new Map();
-					live.hookRuntimeState.postToolLogs = [];
+					resetHookRuntimeStateForNextTurn(live.hookRuntimeState);
 				}
 				if (record.subtype === 'error') {
 					const errMsg = String(record.result ?? 'Claude agent run failed');

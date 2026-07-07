@@ -6,9 +6,18 @@ import {
 	shouldShowToolInUi,
 	stripClaudeMessageMeta,
 	stripNextTags,
+	type AgentTaskItem,
 	type ClaudeMessageMeta,
 	type ClaudeStreamPayload,
 } from './claudeStreamProtocol';
+import {
+	bareToolName,
+	extractTaskIdFromToolResultBlock,
+	extractTaskUpdateFields,
+	extractTaskUpdateFromToolResultBlock,
+	isTaskPlanningToolName,
+	mapSdkTaskStatus,
+} from './taskToolUtils';
 
 export interface StreamSink {
 	onBegin: () => void | Promise<void>;
@@ -32,6 +41,23 @@ export class ClaudeStreamAssembler {
 	private sdkSuggestions: string[] = [];
 	private refusalMessage?: string;
 	private readonly stepUsageByMessageId = new Map<string, { input: number; output: number }>();
+
+	/**
+	 * 用户作业规划（Task 工具）状态。与「强制开工顺序」无关，仅复杂多步业务
+	 * 诉求时才会非空——SDK TaskCreate 的真实 taskId 只出现在其 tool_result 里，
+	 * 因此需要 pendingTaskCreates 暂存 create 阶段的字段，等 tool_result 到达
+	 * 后再登记真实 id；TaskUpdate 的 input 里已带 taskId，可直接应用。
+	 */
+	private readonly agentTasks: AgentTaskItem[] = [];
+	private readonly taskIndexByRealId = new Map<string, number>();
+	private readonly pendingTaskCreates = new Map<
+		string,
+		{ subject: string; description?: string; activeForm?: string }
+	>();
+	private readonly pendingTaskUpdates = new Map<string, Partial<AgentTaskItem>>();
+	private readonly processedTaskToolUseIds = new Set<string>();
+	/** TaskCreate 的 tool_use_id → SDK 真实 taskId（解析失败时用于 TaskUpdate 对齐） */
+	private readonly toolUseIdToRealId = new Map<string, string>();
 
 	constructor(private readonly sink: StreamSink) {}
 
@@ -58,6 +84,7 @@ export class ClaudeStreamAssembler {
 	getOutput(): string {
 		const markdown = this.resolveFinalMarkdown();
 		const suggestions = extractNextSuggestions(markdown);
+		const agentTasks = this.getAgentTasks();
 		const meta: ClaudeMessageMeta = {
 			timeline: [
 				...(this.thinking ? [{ type: 'thinking', content: this.thinking }] : []),
@@ -69,8 +96,14 @@ export class ClaudeStreamAssembler {
 			usage: this.usage,
 			sessionId: this.sessionId,
 			suggestions: suggestions.length ? suggestions : undefined,
+			agentTasks: agentTasks.length ? agentTasks : undefined,
 		};
 		return embedClaudeMessageMeta(markdown, meta);
+	}
+
+	/** 当前用户作业规划快照（过滤 deleted），空数组表示本回合无复杂任务 */
+	getAgentTasks(): AgentTaskItem[] {
+		return this.agentTasks.filter((task) => task.status !== 'deleted');
 	}
 
 	private buildMarkdownTimeline(): Array<{ type: 'markdown'; content: string }> {
@@ -137,6 +170,11 @@ export class ClaudeStreamAssembler {
 			return;
 		}
 
+		if (type === 'user') {
+			await this.consumeUserMessage(record);
+			return;
+		}
+
 		if (type === 'system') {
 			await this.consumeSystemMessage(record);
 			return;
@@ -161,6 +199,28 @@ export class ClaudeStreamAssembler {
 				phase: 'model_fallback',
 				message: trigger ?? 'Model switched due to availability',
 			});
+			return;
+		}
+
+		if (subtype === 'task_started') {
+			const taskId = typeof record.task_id === 'string' ? record.task_id : undefined;
+			const toolUseId = typeof record.tool_use_id === 'string' ? record.tool_use_id : undefined;
+			if (taskId && toolUseId) {
+				this.toolUseIdToRealId.set(toolUseId, taskId);
+				if (this.migrateTaskId(toolUseId, taskId)) {
+					await this.emitTaskSnapshot();
+				}
+			}
+			return;
+		}
+
+		if (subtype === 'task_updated') {
+			const taskId = typeof record.task_id === 'string' ? record.task_id : undefined;
+			const patch = record.patch as Record<string, unknown> | undefined;
+			const status = mapSdkTaskStatus(typeof patch?.status === 'string' ? patch.status : undefined);
+			if (taskId && status && this.tryApplyTaskUpdateWithMigration(taskId, { status })) {
+				await this.emitTaskSnapshot();
+			}
 		}
 	}
 
@@ -237,6 +297,7 @@ export class ClaudeStreamAssembler {
 		this.recordStepUsageFromAnthropicMessage(message);
 		const content = message?.content;
 		if (!Array.isArray(content)) return;
+		let taskChanged = false;
 		for (const block of content) {
 			if (!block || typeof block !== 'object') continue;
 			const b = block as Record<string, unknown>;
@@ -252,8 +313,188 @@ export class ClaudeStreamAssembler {
 					await this.emit({ kind: 'tool_start', callId, name, label: resolveToolLabel(name) });
 					await this.emit({ kind: 'tool_end', callId, ok: true });
 				}
+				if (callId && isTaskPlanningToolName(name)) {
+					const input = (b.input as Record<string, unknown>) ?? {};
+					if (this.handleTaskToolUse(callId, name, input)) taskChanged = true;
+				}
 			}
 		}
+		if (taskChanged) await this.emitTaskSnapshot();
+	}
+
+	/**
+	 * 用户作业规划工具（Task）来自完整 assistant message 的 tool_use 块（含已解析
+	 * 完整 input），而非 stream_event 的增量 delta（tool_use 的 input 在流式阶段是
+	 * 逐字节 JSON 片段，无法安全解析）。TaskCreate 的 subject/description 已在
+	 * input 中给出，但真实 taskId 仅出现在其 tool_result（由 consumeUserMessage
+	 * 处理）；TaskUpdate 的 input 已带 taskId，可直接应用。
+	 * 返回 true 表示 agentTasks 快照发生了可见变化（需要上层 emit）。
+	 */
+	private handleTaskToolUse(callId: string, name: string, input: Record<string, unknown>): boolean {
+		if (this.processedTaskToolUseIds.has(callId)) return false;
+		this.processedTaskToolUseIds.add(callId);
+
+		const bareName = bareToolName(name);
+		if (bareName === 'TaskCreate') {
+			const subject = typeof input.subject === 'string' ? input.subject : '';
+			const description = typeof input.description === 'string' ? input.description : undefined;
+			const activeForm = typeof input.activeForm === 'string' ? input.activeForm : undefined;
+			this.pendingTaskCreates.set(callId, { subject, description, activeForm });
+			return false;
+		}
+
+		if (bareName === 'TaskUpdate') {
+			const { taskId, fields } = extractTaskUpdateFields(input);
+			if (!taskId || !Object.keys(fields).length) return false;
+			return this.tryApplyTaskUpdateWithMigration(taskId, fields);
+		}
+
+		return false;
+	}
+
+	private resolveTaskIndex(taskId: string): number | undefined {
+		const direct = this.taskIndexByRealId.get(taskId);
+		if (direct !== undefined) return direct;
+
+		const aliased = this.toolUseIdToRealId.get(taskId);
+		if (aliased) {
+			const idx = this.taskIndexByRealId.get(aliased);
+			if (idx !== undefined) return idx;
+		}
+
+		for (const [toolUseId, realId] of this.toolUseIdToRealId) {
+			if (taskId === realId) {
+				const idx = this.taskIndexByRealId.get(realId) ?? this.taskIndexByRealId.get(toolUseId);
+				if (idx !== undefined) return idx;
+			}
+		}
+
+		return undefined;
+	}
+
+	private tryApplyTaskUpdateWithMigration(taskId: string, fields: Partial<AgentTaskItem>): boolean {
+		if (this.applyTaskUpdate(taskId, fields)) return true;
+		const tasks = this.getAgentTasks();
+		if (tasks.length === 1 && tasks[0].id.startsWith('call_') && taskId !== tasks[0].id) {
+			if (this.migrateTaskId(tasks[0].id, taskId)) {
+				this.applyTaskUpdate(taskId, fields);
+				return true;
+			}
+		}
+		this.applyTaskUpdate(taskId, fields);
+		return false;
+	}
+
+	private applyTaskUpdate(taskId: string, fields: Partial<AgentTaskItem>): boolean {
+		const idx = this.resolveTaskIndex(taskId);
+		if (idx === undefined) {
+			const existing = this.pendingTaskUpdates.get(taskId) ?? {};
+			this.pendingTaskUpdates.set(taskId, { ...existing, ...fields });
+			return false;
+		}
+		const prev = this.agentTasks[idx];
+		const next = { ...prev, ...fields };
+		if (JSON.stringify(prev) === JSON.stringify(next)) return false;
+		this.agentTasks[idx] = next;
+		return true;
+	}
+
+	private migrateTaskId(fromId: string, toId: string): boolean {
+		if (!fromId || !toId || fromId === toId) return false;
+		const idx = this.taskIndexByRealId.get(fromId);
+		if (idx === undefined) return false;
+
+		this.agentTasks[idx] = { ...this.agentTasks[idx], id: toId };
+		this.taskIndexByRealId.delete(fromId);
+		this.taskIndexByRealId.set(toId, idx);
+		this.toolUseIdToRealId.set(fromId, toId);
+
+		const pending = this.pendingTaskUpdates.get(fromId);
+		if (pending) {
+			this.applyTaskUpdate(toId, pending);
+			this.pendingTaskUpdates.delete(fromId);
+		}
+		const pendingByReal = this.pendingTaskUpdates.get(toId);
+		if (pendingByReal) {
+			this.applyTaskUpdate(toId, pendingByReal);
+			this.pendingTaskUpdates.delete(toId);
+		}
+		return true;
+	}
+
+	private registerTaskId(realId: string, initial: AgentTaskItem, toolUseId?: string): void {
+		if (toolUseId && realId !== toolUseId) {
+			this.toolUseIdToRealId.set(toolUseId, realId);
+			if (this.taskIndexByRealId.has(toolUseId)) {
+				this.migrateTaskId(toolUseId, realId);
+				return;
+			}
+		}
+
+		const idx = this.agentTasks.length;
+		this.agentTasks.push(initial);
+		this.taskIndexByRealId.set(realId, idx);
+		if (toolUseId) this.toolUseIdToRealId.set(toolUseId, realId);
+
+		for (const key of [realId, toolUseId].filter(Boolean) as string[]) {
+			const pendingUpdate = this.pendingTaskUpdates.get(key);
+			if (pendingUpdate) {
+				this.applyTaskUpdate(realId, pendingUpdate);
+				this.pendingTaskUpdates.delete(key);
+			}
+		}
+	}
+
+	private async consumeUserMessage(record: Record<string, unknown>): Promise<void> {
+		const message = record.message as Record<string, unknown> | undefined;
+		const content = message?.content;
+		if (!Array.isArray(content)) return;
+		let changed = false;
+		for (const block of content) {
+			if (!block || typeof block !== 'object') continue;
+			const b = block as Record<string, unknown>;
+			if (b.type !== 'tool_result') continue;
+			if (this.handleTaskToolResult(b)) changed = true;
+			if (this.handleTaskUpdateToolResult(b)) changed = true;
+		}
+		if (changed) await this.emitTaskSnapshot();
+	}
+
+	/** TaskUpdate 的 tool_result：从 statusChange 确认状态（assistant tool_use 已先行解析时作兜底） */
+	private handleTaskUpdateToolResult(block: Record<string, unknown>): boolean {
+		const { taskId, status } = extractTaskUpdateFromToolResultBlock(block);
+		if (!taskId) return false;
+		const fields: Partial<AgentTaskItem> = {};
+		if (status) fields.status = status;
+		if (!Object.keys(fields).length) return false;
+		return this.tryApplyTaskUpdateWithMigration(taskId, fields);
+	}
+
+	private handleTaskToolResult(block: Record<string, unknown>): boolean {
+		const toolUseId = typeof block.tool_use_id === 'string' ? block.tool_use_id : undefined;
+		if (!toolUseId) return false;
+		const pending = this.pendingTaskCreates.get(toolUseId);
+		if (!pending) return false;
+		this.pendingTaskCreates.delete(toolUseId);
+
+		const parsedId = extractTaskIdFromToolResultBlock(block);
+		const realId = parsedId ?? toolUseId;
+		this.registerTaskId(
+			realId,
+			{
+				id: realId,
+				subject: pending.subject || realId,
+				description: pending.description,
+				activeForm: pending.activeForm,
+				status: 'pending',
+			},
+			toolUseId,
+		);
+		return true;
+	}
+
+	private async emitTaskSnapshot(): Promise<void> {
+		await this.emit({ kind: 'task_snapshot', tasks: this.getAgentTasks() });
 	}
 
 	private async appendAssistantText(text: string): Promise<void> {
@@ -323,6 +564,9 @@ export class ClaudeStreamAssembler {
 		}
 		if (record.subtype === 'success') {
 			await this.emit({ kind: 'status', phase: 'success', message: 'completed' });
+			if (this.getAgentTasks().length > 0) {
+				await this.emitTaskSnapshot();
+			}
 		} else if (record.subtype === 'error') {
 			await this.emit({ kind: 'status', phase: 'error', message: String(record.result ?? 'error') });
 		}
