@@ -39,6 +39,11 @@ test('TaskCreate + TaskUpdate 流式同步 completed 状态', async () => {
 		},
 	});
 
+	let snap = lastTaskSnapshot(payloads);
+	assert.ok(snap, 'TaskCreate 后应立即推送 task_snapshot');
+	assert.equal(snap.tasks[0].status, 'pending');
+	assert.equal(snap.tasks[0].id, 'call_create_1');
+
 	await assembler.consume({
 		type: 'user',
 		message: {
@@ -52,7 +57,7 @@ test('TaskCreate + TaskUpdate 流式同步 completed 状态', async () => {
 		},
 	});
 
-	let snap = lastTaskSnapshot(payloads);
+	snap = lastTaskSnapshot(payloads);
 	assert.equal(snap.tasks[0].status, 'pending');
 	assert.equal(snap.tasks[0].id, 'task_real_1');
 

@@ -325,9 +325,9 @@ export class ClaudeStreamAssembler {
 	/**
 	 * 用户作业规划工具（Task）来自完整 assistant message 的 tool_use 块（含已解析
 	 * 完整 input），而非 stream_event 的增量 delta（tool_use 的 input 在流式阶段是
-	 * 逐字节 JSON 片段，无法安全解析）。TaskCreate 的 subject/description 已在
-	 * input 中给出，但真实 taskId 仅出现在其 tool_result（由 consumeUserMessage
-	 * 处理）；TaskUpdate 的 input 已带 taskId，可直接应用。
+	 * TaskCreate 的 subject/description 在 assistant tool_use 完整 input 中即可解析，
+	 * 解析后立即登记并推送 task_snapshot（不必等 tool_result）。tool_result 到达时
+	 * 若含 SDK 真实 taskId 则迁移 id；TaskUpdate 的 input 已带 taskId，可直接应用。
 	 * 返回 true 表示 agentTasks 快照发生了可见变化（需要上层 emit）。
 	 */
 	private handleTaskToolUse(callId: string, name: string, input: Record<string, unknown>): boolean {
@@ -336,11 +336,23 @@ export class ClaudeStreamAssembler {
 
 		const bareName = bareToolName(name);
 		if (bareName === 'TaskCreate') {
-			const subject = typeof input.subject === 'string' ? input.subject : '';
+			const subject = typeof input.subject === 'string' ? input.subject.trim() : '';
+			if (!subject) return false;
+			if (this.resolveTaskIndex(callId) !== undefined) return false;
 			const description = typeof input.description === 'string' ? input.description : undefined;
 			const activeForm = typeof input.activeForm === 'string' ? input.activeForm : undefined;
-			this.pendingTaskCreates.set(callId, { subject, description, activeForm });
-			return false;
+			this.registerTaskId(
+				callId,
+				{
+					id: callId,
+					subject,
+					description,
+					activeForm,
+					status: 'pending',
+				},
+				callId,
+			);
+			return true;
 		}
 
 		if (bareName === 'TaskUpdate') {
@@ -473,11 +485,21 @@ export class ClaudeStreamAssembler {
 	private handleTaskToolResult(block: Record<string, unknown>): boolean {
 		const toolUseId = typeof block.tool_use_id === 'string' ? block.tool_use_id : undefined;
 		if (!toolUseId) return false;
+
+		const parsedId = extractTaskIdFromToolResultBlock(block);
+		const existingIdx = this.resolveTaskIndex(toolUseId);
+		if (existingIdx !== undefined) {
+			this.pendingTaskCreates.delete(toolUseId);
+			if (parsedId && parsedId !== toolUseId) {
+				return this.migrateTaskId(toolUseId, parsedId);
+			}
+			return false;
+		}
+
 		const pending = this.pendingTaskCreates.get(toolUseId);
 		if (!pending) return false;
 		this.pendingTaskCreates.delete(toolUseId);
 
-		const parsedId = extractTaskIdFromToolResultBlock(block);
 		const realId = parsedId ?? toolUseId;
 		this.registerTaskId(
 			realId,

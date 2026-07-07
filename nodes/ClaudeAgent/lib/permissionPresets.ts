@@ -37,18 +37,22 @@ export const PERMISSION_PRESETS: Record<string, PermissionPresetConfig> = {
 	},
 	mcp_skills_only: {
 		tools: { type: 'preset', preset: 'claude_code' },
+		allowedTools: ['Skill', 'TaskCreate', 'TaskUpdate'],
 		disallowedTools: [
 			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
-			'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
+			'WebFetch', 'WebSearch', 'NotebookEdit',
+			'TaskGet', 'TaskList',
 		],
 		permissionMode: 'dontAsk',
 		defaultStrictMcpConfig: true,
 	},
 	plan_only: {
 		tools: { type: 'preset', preset: 'claude_code' },
+		allowedTools: ['Skill', 'TaskCreate', 'TaskUpdate'],
 		disallowedTools: [
 			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
-			'WebFetch', 'WebSearch', 'Task', 'NotebookEdit',
+			'WebFetch', 'WebSearch', 'NotebookEdit',
+			'TaskGet', 'TaskList',
 		],
 		permissionMode: 'dontAsk',
 	},

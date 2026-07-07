@@ -160,10 +160,15 @@ export function buildDeclarativeHooks(
 						state.postToolSuccessNames.add(bareName);
 
 						if (bareName === 'TaskCreate') {
-							const realId = extractTaskIdFromToolPayload(
-								(input as { tool_response?: unknown }).tool_response,
-							);
+							const postInput = input as { tool_response?: unknown; tool_input?: unknown; tool_use_id?: string };
+							const toolUseId = typeof postInput.tool_use_id === 'string' ? postInput.tool_use_id : '';
+							const realId = extractTaskIdFromToolPayload(postInput.tool_response)
+								?? extractTaskIdFromToolPayload(postInput.tool_input)
+								?? toolUseId;
 							if (realId) state.taskStatusById.set(realId, 'pending');
+							if (toolUseId && toolUseId !== realId) {
+								state.taskStatusById.set(toolUseId, 'pending');
+							}
 						} else if (bareName === 'TaskUpdate') {
 							const toolInput = (input as { tool_input?: unknown }).tool_input;
 							if (toolInput && typeof toolInput === 'object') {
@@ -194,6 +199,34 @@ export function buildDeclarativeHooks(
 			: 3;
 		const proposalWriteTools = stopConfig.proposalWriteTools ?? [];
 
+		hooks.TaskCreated = [
+			{
+				hooks: [
+					async (input: HookInput): Promise<HookJSONOutput> => {
+						const created = input as { task_id?: string };
+						if (typeof created.task_id === 'string' && created.task_id) {
+							state.taskStatusById.set(created.task_id, 'pending');
+						}
+						return {};
+					},
+				],
+			},
+		];
+
+		hooks.TaskCompleted = [
+			{
+				hooks: [
+					async (input: HookInput): Promise<HookJSONOutput> => {
+						const completed = input as { task_id?: string };
+						if (typeof completed.task_id === 'string' && completed.task_id) {
+							state.taskStatusById.set(completed.task_id, 'completed');
+						}
+						return {};
+					},
+				],
+			},
+		];
+
 		hooks.Stop = [
 			{
 				hooks: [
@@ -220,7 +253,10 @@ export function buildDeclarativeHooks(
 								(status) => status !== 'completed',
 							);
 							if (incomplete) {
-								reasons.push('本轮建立的作业规划（Task）尚未全部标记为 completed');
+								reasons.push(
+									'作业规划 Task 尚未全部 completed：每完成一步必须 TaskUpdate（status: completed），'
+									+ '开始下一步前 TaskUpdate（status: in_progress）；禁止仅用 Markdown 表格/报告代替 TaskUpdate',
+								);
 							}
 						}
 
@@ -232,10 +268,17 @@ export function buildDeclarativeHooks(
 						}
 						state.stopBlockCount += 1;
 
+						// SDK 官方契约：Stop 事件必须在顶层设置 decision:'block' + reason 才会真正
+						// 阻止 Claude 结束本轮；单独的 hookSpecificOutput.additionalContext 只是「非阻断
+						// 式反馈」，不会阻止 Stop（此前版本只写了 additionalContext，Hook 从未真正拦截过，
+						// 这是任务清单「生成但不勾选完成」的根因，而非 streamAssembler/前端捕获问题）。
+						const reason = reasons.join('；') + '。请补齐后再结束本轮回复。';
 						return {
+							decision: 'block',
+							reason,
 							hookSpecificOutput: {
 								hookEventName: 'Stop',
-								additionalContext: reasons.join('；') + '。请补齐后再结束本轮回复。',
+								additionalContext: reason,
 							},
 						};
 					},
