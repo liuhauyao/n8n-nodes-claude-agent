@@ -70,6 +70,33 @@ test('TaskUpdate PostToolUse 更新 completed 后 Stop Hook 放行', async () =>
 	assert.deepEqual(allowed, {});
 });
 
+test('TaskCreate 纯文本 tool_response（第三方模型 shim 转发）不产生孤儿 pending 项（2026-07-07 生产复现）', async () => {
+	const state = createHookRuntimeState();
+	const hooks = buildDeclarativeHooks({ stopHook: { enabled: true, requireAllTasksCompleted: true, maxBlocks: 3 } }, state);
+
+	// 生产实录：tool_response 是人类可读文本而非结构化 JSON
+	await runPostToolUse(hooks, {
+		hook_event_name: 'PostToolUse',
+		tool_name: 'TaskCreate',
+		tool_input: { subject: '任务一' },
+		tool_response: 'Task #1 created successfully: 任务一',
+		tool_use_id: 'call_00_abc',
+	});
+
+	// Agent 用 SDK 真实 id "1"（而非 tool_use_id）调用 TaskUpdate
+	await runPostToolUse(hooks, {
+		hook_event_name: 'PostToolUse',
+		tool_name: 'TaskUpdate',
+		tool_input: { taskId: '1', status: 'completed' },
+		tool_response: 'Updated task #1 status',
+		tool_use_id: 'call_00_upd',
+	});
+
+	// 修复前：taskStatusById 里 call_00_abc 永远停在 pending（孤儿项），Stop Hook 永远拦截
+	const allowed = await runStopHook(hooks, state, '正文\n<next>继续</next>');
+	assert.deepEqual(allowed, {}, 'taskId 应正确迁移为 "1"，不应残留 tool_use_id 孤儿 pending 项导致误拦截');
+});
+
 test('TaskCreated / TaskCompleted SDK 事件同步 taskStatusById', async () => {
 	const state = createHookRuntimeState();
 	const hooks = buildDeclarativeHooks({ stopHook: { enabled: true, requireAllTasksCompleted: true } }, state);

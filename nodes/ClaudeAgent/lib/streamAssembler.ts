@@ -461,20 +461,27 @@ export class ClaudeStreamAssembler {
 		const message = record.message as Record<string, unknown> | undefined;
 		const content = message?.content;
 		if (!Array.isArray(content)) return;
+		// SDK 官方结构化结果（TaskCreateOutput/TaskUpdateOutput 真源）挂在消息记录的
+		// tool_use_result 字段，与 message.content 同级；message.content[].content
+		// 只是喂给模型看的人类可读文本，不同上游模型/网关（如第三方模型经 OpenAI 兼容
+		// shim 转发）格式不一致（例如纯文本 "Task #1 created successfully: ..."），
+		// 曾误把 taskId 解析兜底成 tool_use_id，导致 TaskUpdate 永远匹配不到已创建的
+		// 任务、前端 Queue 卡在 pending 不勾选——这是本类 bug 的真实根因。
+		const toolUseResult = record.tool_use_result ?? (record as Record<string, unknown>).toolUseResult;
 		let changed = false;
 		for (const block of content) {
 			if (!block || typeof block !== 'object') continue;
 			const b = block as Record<string, unknown>;
 			if (b.type !== 'tool_result') continue;
-			if (this.handleTaskToolResult(b)) changed = true;
-			if (this.handleTaskUpdateToolResult(b)) changed = true;
+			if (this.handleTaskToolResult(b, toolUseResult)) changed = true;
+			if (this.handleTaskUpdateToolResult(b, toolUseResult)) changed = true;
 		}
 		if (changed) await this.emitTaskSnapshot();
 	}
 
 	/** TaskUpdate 的 tool_result：从 statusChange 确认状态（assistant tool_use 已先行解析时作兜底） */
-	private handleTaskUpdateToolResult(block: Record<string, unknown>): boolean {
-		const { taskId, status } = extractTaskUpdateFromToolResultBlock(block);
+	private handleTaskUpdateToolResult(block: Record<string, unknown>, toolUseResult?: unknown): boolean {
+		const { taskId, status } = extractTaskUpdateFromToolResultBlock(block, toolUseResult);
 		if (!taskId) return false;
 		const fields: Partial<AgentTaskItem> = {};
 		if (status) fields.status = status;
@@ -482,11 +489,11 @@ export class ClaudeStreamAssembler {
 		return this.tryApplyTaskUpdateWithMigration(taskId, fields);
 	}
 
-	private handleTaskToolResult(block: Record<string, unknown>): boolean {
+	private handleTaskToolResult(block: Record<string, unknown>, toolUseResult?: unknown): boolean {
 		const toolUseId = typeof block.tool_use_id === 'string' ? block.tool_use_id : undefined;
 		if (!toolUseId) return false;
 
-		const parsedId = extractTaskIdFromToolResultBlock(block);
+		const parsedId = extractTaskIdFromToolResultBlock(block, toolUseResult);
 		const existingIdx = this.resolveTaskIndex(toolUseId);
 		if (existingIdx !== undefined) {
 			this.pendingTaskCreates.delete(toolUseId);

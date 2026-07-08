@@ -23,6 +23,23 @@ export function mapSdkTaskStatus(
 	return undefined;
 }
 
+/**
+ * 从 "Task #1 created successfully: xxx" / "Updated task #1 status" 这类纯文本
+ * 兜底提取 taskId。部分模型/网关（如经 OpenAI 兼容 shim 转发的第三方模型，2026-07-07
+ * 生产复现：model=deepseek-v4-flash）返回的 tool_result.content /
+ * PostToolUse.tool_response 是人类可读文本而非结构化 JSON——SDK 官方结构化数据
+ * 实际挂在与 message 同级的 tool_use_result 字段（见 extractTaskIdFromToolResultBlock
+ * 的 toolUseResult 参数），此函数仅作该字段缺失时的最后兜底，避免误把 tool_use_id
+ * 当成任务 id（曾导致 TaskUpdate 永远匹配不到已创建任务、Queue 卡在 pending 不勾选）。
+ */
+function extractTaskIdFromPlainTextResult(text: string): string | undefined {
+	const created = text.match(/Task\s*#(\S+)\s+created/i);
+	if (created) return created[1];
+	const updated = text.match(/[Uu]pdated?\s+task\s*#(\S+)/i);
+	if (updated) return updated[1];
+	return undefined;
+}
+
 /** 从 TaskCreate / TaskUpdate 的 tool_response 或 tool_result.content 提取 taskId */
 export function extractTaskIdFromToolPayload(raw: unknown): string | undefined {
 	if (!raw) return undefined;
@@ -32,7 +49,7 @@ export function extractTaskIdFromToolPayload(raw: unknown): string | undefined {
 		try {
 			return extractTaskIdFromToolPayload(JSON.parse(trimmed));
 		} catch {
-			return undefined;
+			return extractTaskIdFromPlainTextResult(trimmed);
 		}
 	}
 	if (Array.isArray(raw)) {
@@ -54,14 +71,27 @@ export function extractTaskIdFromToolPayload(raw: unknown): string | undefined {
 	return undefined;
 }
 
-/** 从 Anthropic tool_result 块提取 taskId */
-export function extractTaskIdFromToolResultBlock(block: Record<string, unknown>): string | undefined {
+/**
+ * 从 Anthropic tool_result 块提取 taskId。
+ * @param toolUseResult SDK 消息里与 message 同级的 `tool_use_result` 结构化字段
+ * （官方 TaskCreateOutput 真源：{ task: { id, subject } }）；block.content 只是
+ * 喂给模型看的文本，不同上游模型/网关格式不一致，不能作为主判据。
+ */
+export function extractTaskIdFromToolResultBlock(
+	block: Record<string, unknown>,
+	toolUseResult?: unknown,
+): string | undefined {
+	const fromStructured = extractTaskIdFromToolPayload(toolUseResult);
+	if (fromStructured) return fromStructured;
 	const fromContent = extractTaskIdFromToolPayload(block.content);
 	if (fromContent) return fromContent;
 	return extractTaskIdFromToolPayload(block);
 }
 
-export function extractTaskUpdateFromToolResultBlock(block: Record<string, unknown>): {
+export function extractTaskUpdateFromToolResultBlock(
+	block: Record<string, unknown>,
+	toolUseResult?: unknown,
+): {
 	taskId?: string;
 	status?: AgentTaskItem['status'];
 } {
@@ -71,7 +101,8 @@ export function extractTaskUpdateFromToolResultBlock(block: Record<string, unkno
 			try {
 				return tryParse(JSON.parse(raw));
 			} catch {
-				return undefined;
+				const taskId = extractTaskIdFromPlainTextResult(raw);
+				return taskId ? { taskId } : undefined;
 			}
 		}
 		if (Array.isArray(raw)) {
@@ -98,6 +129,9 @@ export function extractTaskUpdateFromToolResultBlock(block: Record<string, unkno
 		return undefined;
 	};
 
+	// 结构化 tool_use_result（官方 TaskUpdateOutput 真源）优先于喂给模型看的文本 content
+	const fromStructured = tryParse(toolUseResult);
+	if (fromStructured?.taskId) return fromStructured;
 	const fromContent = tryParse(block.content);
 	if (fromContent?.taskId) return fromContent;
 	return tryParse(block) ?? {};

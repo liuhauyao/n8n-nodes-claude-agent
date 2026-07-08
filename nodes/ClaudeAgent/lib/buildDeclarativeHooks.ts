@@ -160,15 +160,18 @@ export function buildDeclarativeHooks(
 						state.postToolSuccessNames.add(bareName);
 
 						if (bareName === 'TaskCreate') {
+							// extractTaskIdFromToolPayload 内含纯文本兜底解析（如第三方模型经 shim
+							// 转发返回 "Task #1 created successfully: xxx"），能命中时必须只登记这一个
+							// 真实 id；若额外把 tool_use_id 也登记为 pending，TaskUpdate 用真实 id
+							// 完成后 tool_use_id 那条会成为永远清不掉的孤儿 pending 项，导致 Stop Hook
+							// 误判"未全部完成"而无限拦截（2026-07-07 生产复现的根因之一）。
+							// 仅当两种结构化/文本解析都失败时，才退化为用 tool_use_id 本身占位登记。
 							const postInput = input as { tool_response?: unknown; tool_input?: unknown; tool_use_id?: string };
 							const toolUseId = typeof postInput.tool_use_id === 'string' ? postInput.tool_use_id : '';
 							const realId = extractTaskIdFromToolPayload(postInput.tool_response)
 								?? extractTaskIdFromToolPayload(postInput.tool_input)
 								?? toolUseId;
 							if (realId) state.taskStatusById.set(realId, 'pending');
-							if (toolUseId && toolUseId !== realId) {
-								state.taskStatusById.set(toolUseId, 'pending');
-							}
 						} else if (bareName === 'TaskUpdate') {
 							const toolInput = (input as { tool_input?: unknown }).tool_input;
 							if (toolInput && typeof toolInput === 'object') {
