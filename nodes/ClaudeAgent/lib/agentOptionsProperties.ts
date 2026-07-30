@@ -244,7 +244,9 @@ export const CLAUDE_AGENT_OPTIONS_PROPERTY: INodeProperties = {
 						'blocks turn completion via additionalContext until checks pass or maxBlocks is hit. Example: ' +
 						'{"postToolUse":{"logToOutput":true},"stopHook":{"enabled":true,"maxBlocks":3,' +
 						'"requireNextTag":true,"requireProposalCreatedOnToolSuccess":true,' +
-						'"proposalWriteTools":["createDefinitionProposal","updateDefinitionProposal"],' +
+						'"requireProposalIdsSubsetOfToolResults":true,' +
+						'"proposalWriteTools":["writeDefinitionProposal","writeEventProposal","writeConceptProposal",' +
+						'"deleteEntityProposal","writeRelationProposal","writeWorkProposal","writeChapterProposal"],' +
 						'"requireAllTasksCompleted":true}}',
 				},
 			],

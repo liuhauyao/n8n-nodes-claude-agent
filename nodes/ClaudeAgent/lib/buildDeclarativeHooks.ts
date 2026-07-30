@@ -20,6 +20,7 @@ export interface DeclarativePostToolUseConfig {
  * 不额外调用评估模型）。仅做规则可判定的检查——不判断记忆是否该写（那属于 Agent
  * 自身的主观判断，见 SKILL「写入检查」），只判断已发生的客观事实：
  * - 本轮是否有 MCP 写工具成功却缺 `<proposal_created>`
+ * - 正文 `<proposal_created proposalId>` 是否 ⊆ 本轮写工具返回的 proposalId
  * - 正文是否缺 `<next>` 建议
  * - 若本轮建立了「作业规划」Task，是否全部 completed
  */
@@ -31,7 +32,12 @@ export interface DeclarativeStopHookConfig {
 	requireNextTag?: boolean;
 	/** 命中 proposalWriteTools 成功调用后，正文缺 `<proposal_created` 时是否 block */
 	requireProposalCreatedOnToolSuccess?: boolean;
-	/** 触发 requireProposalCreatedOnToolSuccess 的工具名（裸名或前缀通配，如 'create*'） */
+	/**
+	 * 正文中 `<proposal_created proposalId>` 必须 ⊆ 本轮 proposalWriteTools 的 tool_response
+	 * 所记录的 proposalId（防手拼/幻觉 ID）
+	 */
+	requireProposalIdsSubsetOfToolResults?: boolean;
+	/** 触发 proposal 相关 Stop 检查的工具名（裸名或前缀通配，如 'write*'） */
 	proposalWriteTools?: string[];
 	/** 若本轮存在 Task 作业规划，是否要求全部 completed 才允许结束 */
 	requireAllTasksCompleted?: boolean;
@@ -49,6 +55,8 @@ export interface HookRuntimeState {
 	postToolLogs: Array<{ tool: string; ok: boolean; error?: string }>;
 	/** 本轮成功执行过的工具裸名集合（供 Stop Hook 判定 proposal_created 是否遗漏） */
 	postToolSuccessNames: Set<string>;
+	/** 本轮 proposalWriteTools 成功响应中解析出的 proposalId（供子集校验） */
+	proposalIdsFromWriteTools: Set<string>;
 	/** 本轮 Task 作业规划状态（taskId → status），供 Stop Hook 判定是否全部完成 */
 	taskStatusById: Map<string, string>;
 	/** Stop Hook 已连续 block 次数，达到 maxBlocks 后放行避免死循环 */
@@ -73,6 +81,7 @@ export function createHookRuntimeState(): HookRuntimeState {
 		perToolCounts: new Map(),
 		postToolLogs: [],
 		postToolSuccessNames: new Set(),
+		proposalIdsFromWriteTools: new Set(),
 		taskStatusById: new Map(),
 		stopBlockCount: 0,
 	};
@@ -84,6 +93,7 @@ export function resetHookRuntimeStateForNextTurn(state: HookRuntimeState): void 
 	state.perToolCounts = new Map();
 	state.postToolLogs = [];
 	state.postToolSuccessNames = new Set();
+	state.proposalIdsFromWriteTools = new Set();
 	state.taskStatusById = new Map();
 	state.stopBlockCount = 0;
 }
@@ -148,8 +158,10 @@ export function buildDeclarativeHooks(
 		];
 	}
 
+	const proposalWriteToolsForPost = config.stopHook?.proposalWriteTools ?? [];
+
 	// PostToolUse：既承载既有 logToOutput 日志，也为 Stop Hook 累积「工具是否成功」
-	// 「Task 是否全部完成」两类事实依据，因此只要 stopHook 启用也需要挂载。
+	// 「Task 是否全部完成」「写工具 proposalId」事实依据，因此只要 stopHook 启用也需要挂载。
 	if (config.postToolUse || config.stopHook?.enabled) {
 		hooks.PostToolUse = [
 			{
@@ -159,6 +171,15 @@ export function buildDeclarativeHooks(
 						const bareName = bareToolName(toolName);
 						state.postToolSuccessNames.add(bareName);
 
+						const postInput = input as { tool_response?: unknown; tool_input?: unknown; tool_use_id?: string };
+						if (
+							proposalWriteToolsForPost.length > 0
+							&& proposalWriteToolsForPost.some((pattern) => matchesToolPattern(bareName, pattern))
+						) {
+							const pid = extractProposalIdFromToolResponse(postInput.tool_response);
+							if (pid) state.proposalIdsFromWriteTools.add(pid);
+						}
+
 						if (bareName === 'TaskCreate') {
 							// extractTaskIdFromToolPayload 内含纯文本兜底解析（如第三方模型经 shim
 							// 转发返回 "Task #1 created successfully: xxx"），能命中时必须只登记这一个
@@ -166,14 +187,13 @@ export function buildDeclarativeHooks(
 							// 完成后 tool_use_id 那条会成为永远清不掉的孤儿 pending 项，导致 Stop Hook
 							// 误判"未全部完成"而无限拦截（2026-07-07 生产复现的根因之一）。
 							// 仅当两种结构化/文本解析都失败时，才退化为用 tool_use_id 本身占位登记。
-							const postInput = input as { tool_response?: unknown; tool_input?: unknown; tool_use_id?: string };
 							const toolUseId = typeof postInput.tool_use_id === 'string' ? postInput.tool_use_id : '';
 							const realId = extractTaskIdFromToolPayload(postInput.tool_response)
 								?? extractTaskIdFromToolPayload(postInput.tool_input)
 								?? toolUseId;
 							if (realId) state.taskStatusById.set(realId, 'pending');
 						} else if (bareName === 'TaskUpdate') {
-							const toolInput = (input as { tool_input?: unknown }).tool_input;
+							const toolInput = postInput.tool_input;
 							if (toolInput && typeof toolInput === 'object') {
 								const obj = toolInput as Record<string, unknown>;
 								const taskId = (obj.taskId ?? obj.id ?? obj.task_id) as string | undefined;
@@ -251,6 +271,21 @@ export function buildDeclarativeHooks(
 							}
 						}
 
+						if (
+							stopConfig.requireProposalIdsSubsetOfToolResults
+							&& proposalWriteTools.length > 0
+							&& state.proposalIdsFromWriteTools.size > 0
+						) {
+							const bodyIds = extractProposalIdsFromAssistantMessage(lastMessage);
+							const unknown = bodyIds.filter((id) => !state.proposalIdsFromWriteTools.has(id));
+							if (unknown.length > 0) {
+								reasons.push(
+									`正文 <proposal_created> 含未在本轮写工具结果中出现的 proposalId（${unknown.join(', ')}），`
+									+ '请整行原样输出 MCP 响应字段 proposalCreatedTag，禁止手拼或改写 ID',
+								);
+							}
+						}
+
 						if (stopConfig.requireAllTasksCompleted && state.taskStatusById.size > 0) {
 							const incomplete = [...state.taskStatusById.values()].some(
 								(status) => status !== 'completed',
@@ -299,4 +334,47 @@ function matchesToolPattern(toolName: string, pattern: string): boolean {
 		return toolName.startsWith(pattern.slice(0, -1));
 	}
 	return toolName.includes(pattern);
+}
+
+/** 从写工具 tool_response 提取 proposalId（优先 proposalCreatedTag / XML，否则 JSON 字段） */
+export function extractProposalIdFromToolResponse(toolResponse: unknown): string | null {
+	if (toolResponse == null) return null;
+	if (typeof toolResponse === 'object' && !Array.isArray(toolResponse)) {
+		const obj = toolResponse as Record<string, unknown>;
+		const direct = obj.proposalId ?? obj.proposal_id;
+		if (typeof direct === 'string' && direct.trim()) return direct.trim();
+		if (typeof direct === 'number' && Number.isFinite(direct)) return String(direct);
+		const tag = obj.proposalCreatedTag;
+		if (typeof tag === 'string') {
+			const fromTag = extractProposalIdsFromAssistantMessage(tag)[0];
+			if (fromTag) return fromTag;
+		}
+	}
+	const text = typeof toolResponse === 'string'
+		? toolResponse
+		: (() => {
+			try {
+				return JSON.stringify(toolResponse);
+			} catch {
+				return '';
+			}
+		})();
+	if (!text) return null;
+	const fromXml = extractProposalIdsFromAssistantMessage(text)[0];
+	if (fromXml) return fromXml;
+	const jsonMatch = text.match(/"proposalId"\s*:\s*"([^"]+)"/);
+	return jsonMatch?.[1]?.trim() || null;
+}
+
+/** 从助手正文抽取全部 `<proposal_created proposalId="…">` */
+export function extractProposalIdsFromAssistantMessage(message: string): string[] {
+	if (!message) return [];
+	const ids: string[] = [];
+	const re = /<proposal_created\b[^>]*\bproposalId="([^"]+)"/gi;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(message)) !== null) {
+		const id = m[1]?.trim();
+		if (id) ids.push(id);
+	}
+	return ids;
 }

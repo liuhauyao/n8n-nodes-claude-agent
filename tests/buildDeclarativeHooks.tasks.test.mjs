@@ -119,3 +119,71 @@ test('TaskCreated / TaskCompleted SDK 事件同步 taskStatusById', async () => 
 	);
 	assert.equal(state.taskStatusById.get('task_real_1'), 'completed');
 });
+
+const WRITE_TOOLS = ['writeDefinitionProposal'];
+
+test('写工具 PostToolUse 记录 proposalId；正文错 ID 时 Stop 子集校验拦截', async () => {
+	const state = createHookRuntimeState();
+	const hooks = buildDeclarativeHooks({
+		stopHook: {
+			enabled: true,
+			requireProposalCreatedOnToolSuccess: true,
+			requireProposalIdsSubsetOfToolResults: true,
+			proposalWriteTools: WRITE_TOOLS,
+			maxBlocks: 3,
+		},
+	}, state);
+
+	await runPostToolUse(hooks, {
+		hook_event_name: 'PostToolUse',
+		tool_name: 'mcp__matrees__writeDefinitionProposal',
+		tool_input: { operate: 'create' },
+		tool_response: {
+			proposalId: '2082760430044221440',
+			definitionId: '2082760430044221441',
+			proposalCreatedTag:
+				'<proposal_created proposalId="2082760430044221440" entityType="definition" operateType="create" title="后室档案与技术"/>',
+		},
+		tool_use_id: 'call_write_1',
+	});
+
+	assert.ok(state.proposalIdsFromWriteTools.has('2082760430044221440'));
+
+	const blocked = await runStopHook(
+		hooks,
+		state,
+		'说明\n<proposal_created proposalId="2082760430044221442" entityType="definition" operateType="create" title="后室档案与技术"/>\n<next>继续</next>',
+	);
+	assert.equal(blocked.decision, 'block');
+	assert.ok(blocked.reason?.includes('2082760430044221442'));
+});
+
+test('正文 proposalId 与写工具结果一致时 Stop 子集校验放行', async () => {
+	const state = createHookRuntimeState();
+	const hooks = buildDeclarativeHooks({
+		stopHook: {
+			enabled: true,
+			requireProposalCreatedOnToolSuccess: true,
+			requireProposalIdsSubsetOfToolResults: true,
+			proposalWriteTools: WRITE_TOOLS,
+		},
+	}, state);
+
+	await runPostToolUse(hooks, {
+		hook_event_name: 'PostToolUse',
+		tool_name: 'writeDefinitionProposal',
+		tool_response: JSON.stringify({
+			proposalId: '2082760430044221440',
+			proposalCreatedTag:
+				'<proposal_created proposalId="2082760430044221440" entityType="definition" operateType="create" title="t"/>',
+		}),
+		tool_use_id: 'call_write_2',
+	});
+
+	const allowed = await runStopHook(
+		hooks,
+		state,
+		'说明\n<proposal_created proposalId="2082760430044221440" entityType="definition" operateType="create" title="t"/>\n<next>继续</next>',
+	);
+	assert.deepEqual(allowed, {});
+});
