@@ -5,6 +5,7 @@
 
 export type AgentToolGroup =
 	| 'retrieve'
+	| 'web'
 	| 'write'
 	| 'audit'
 	| 'novel'
@@ -135,6 +136,10 @@ const GROUP_BY_TOOL: Record<string, AgentToolGroup> = {
 
 	listIllustration: 'illustration',
 	uploadIllustrationFromUrl: 'illustration',
+
+	// matrees-search MCP（SDK 内置 WebSearch/WebFetch 仍在 HIDDEN_TOOLS）
+	webSearch: 'web',
+	webFetch: 'web',
 
 	Skill: 'internal',
 	getMemory: 'internal',

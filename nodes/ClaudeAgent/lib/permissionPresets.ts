@@ -38,10 +38,18 @@ const MCP_SKILLS_DEFENSE_DENY = [
 	'Workflow', 'Monitor', 'EnterWorktree', 'ExitWorktree',
 	'TaskStop', 'TaskGet', 'TaskList', 'TaskOutput',
 	'Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep',
-	'WebFetch', 'WebSearch', 'Artifact', 'ClaudeDesign', 'Projects',
+	'Artifact', 'ClaudeDesign', 'Projects',
 	'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger',
 	'EnterPlanMode', 'ExitPlanMode', 'EndConversation',
 ] as const;
+
+/**
+ * 内置联网工具一律禁用，出网收口到搜索类 MCP：
+ * - WebSearch 是 Anthropic 服务端工具（web_search_*），经中转网关的非官方模型不提供，放行只会调用失败。
+ * - WebFetch 依赖 Anthropic 域名预检，网关环境不可达；绕过预检（skipWebFetchPreflight）就失去了
+ *   私网防护，因此改由 MCP 侧实现带私网拦截的抓取。
+ */
+const WEB_TOOLS_DENY = ['WebSearch', 'WebFetch'] as const;
 
 const CODEBASE_READ_TOOLS = {
 	tools: { type: 'preset', preset: 'claude_code' } as const,
@@ -60,17 +68,18 @@ export const PERMISSION_PRESETS: Record<string, PermissionPresetConfig> = {
 	read_only: {
 		...CODEBASE_READ_TOOLS,
 	},
+	/** 联网走 MCP（如 matrees-search 的 webSearch / webFetch），内置 Web* 工具全禁 */
 	mcp_skills_only: {
 		tools: [...MCP_SKILLS_BUILTIN_TOOLS],
 		allowedTools: ['Skill', 'TaskCreate', 'TaskUpdate'],
-		disallowedTools: [...MCP_SKILLS_DEFENSE_DENY],
+		disallowedTools: [...MCP_SKILLS_DEFENSE_DENY, ...WEB_TOOLS_DENY],
 		permissionMode: 'dontAsk',
 		defaultStrictMcpConfig: true,
 	},
 	plan_only: {
 		tools: [...MCP_SKILLS_BUILTIN_TOOLS],
 		allowedTools: ['Skill', 'TaskCreate', 'TaskUpdate'],
-		disallowedTools: [...MCP_SKILLS_DEFENSE_DENY],
+		disallowedTools: [...MCP_SKILLS_DEFENSE_DENY, ...WEB_TOOLS_DENY],
 		permissionMode: 'dontAsk',
 	},
 	/** 内部调试：全量 Claude Code 工具；灵感助手生产路径勿用 */

@@ -50,11 +50,21 @@ function readSettingSources(raw: string | string[] | undefined): SettingSource[]
 	return values.filter(Boolean) as SettingSource[];
 }
 
-function readSkills(raw: string | undefined): string[] | 'all' | undefined {
-	const trimmed = raw?.trim();
-	if (!trimmed) return undefined;
-	if (trimmed.toLowerCase() === 'all') return 'all';
-	return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+/**
+ * 白名单可能是逗号分隔字符串，也可能是历史工作流里存下的 string[]。
+ * 返回 undefined 时 SDK 会加载全部技能（含 SDK 自带的 deep-research 等），
+ * 因此数组形态必须解析成功，否则白名单会静默失效。
+ */
+function readSkills(raw: unknown): string[] | 'all' | undefined {
+	const values = Array.isArray(raw)
+		? raw.map((item) => String(item ?? '').trim())
+		: typeof raw === 'string'
+			? raw.split(',').map((s) => s.trim())
+			: [];
+	const list = values.filter(Boolean);
+	if (!list.length) return undefined;
+	if (list.length === 1 && list[0].toLowerCase() === 'all') return 'all';
+	return list;
 }
 
 function pickString(value: unknown): string {
@@ -99,9 +109,11 @@ export function readClaudeAgentRunParams(
 			? workspace.settingSources
 			: ctx.getNodeParameter('settingSources', itemIndex, ['project']);
 
-	const skillsRaw =
-		pickString(workspace.skills)
-		|| pickString(ctx.getNodeParameter('skills', itemIndex, ''));
+	const skills = readSkills(
+		workspace.skills !== undefined
+			? workspace.skills
+			: ctx.getNodeParameter('skills', itemIndex, ''),
+	);
 
 	const sessionId =
 		pickString(session.sessionId)
@@ -158,7 +170,7 @@ export function readClaudeAgentRunParams(
 		skillsRoot.trim()
 		|| workingDirectories.length > 0
 		|| workingDirectory.trim()
-		|| skillsRaw.trim()
+		|| skills !== undefined
 		|| (Array.isArray(settingSourcesRaw) && settingSourcesRaw.length > 0)
 		|| (typeof settingSourcesRaw === 'string' && settingSourcesRaw.trim()),
 	);
@@ -188,7 +200,7 @@ export function readClaudeAgentRunParams(
 		workingDirectories,
 		workingDirectory: workingDirectory.trim(),
 		settingSources: readSettingSources(settingSourcesRaw as string | string[] | undefined),
-		skills: readSkills(skillsRaw),
+		skills,
 		permissionPreset,
 		maxTurns: maxTurnsRaw,
 		useClaudeCodePreset,
