@@ -3,7 +3,11 @@ import type { Query } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeModelConfig, StoredSessionRecord } from '../../../dist/nodes/shared/lib/types';
 import { modelConfigSummary } from '../../../dist/nodes/shared/lib/resolveModelConfig';
 import { buildQueryOptions, getHookRuntimeState } from '../../../dist/nodes/ClaudeAgent/lib/buildQueryOptions';
-import { resetHookRuntimeStateForNextTurn, type HookRuntimeState } from '../../../dist/nodes/ClaudeAgent/lib/buildDeclarativeHooks';
+import {
+	recordAssistantMessageForHooks,
+	resetHookRuntimeStateForNextTurn,
+	type HookRuntimeState,
+} from '../../../dist/nodes/ClaudeAgent/lib/buildDeclarativeHooks';
 import { pickExtendedQueryFields } from '../../../dist/nodes/ClaudeAgent/lib/extendedQueryFields';
 import { sanitizeQueryOptionsForSdk } from '../../../dist/nodes/ClaudeAgent/lib/queryOptionsSanitize';
 import { loadClaudeSdk } from '../../../dist/nodes/ClaudeAgent/lib/loadClaudeSdk';
@@ -431,6 +435,10 @@ export class SessionManager {
 
 		try {
 			for await (const message of query) {
+				// 先登记助手正文，供 Stop Hook 按「本轮」判定 proposal 标记是否已按增量交付输出
+				if (live.hookRuntimeState) {
+					recordAssistantMessageForHooks(live.hookRuntimeState, message);
+				}
 				const sink = live.currentSink;
 				if (sink) await sink.consumeSdkMessage(message);
 			// 累积文本到轮次缓冲，供断线重连时获取进度快照

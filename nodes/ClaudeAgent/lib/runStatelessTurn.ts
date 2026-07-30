@@ -1,6 +1,7 @@
 import type { ClaudeModelConfig, StoredSessionRecord } from '../../shared/lib/types';
 import { modelConfigSummary } from '../../shared/lib/resolveModelConfig';
-import { buildQueryOptions, type BuildQueryOptionsInput } from './buildQueryOptions';
+import { buildQueryOptions, getHookRuntimeState, type BuildQueryOptionsInput } from './buildQueryOptions';
+import { recordAssistantMessageForHooks } from './buildDeclarativeHooks';
 import { getExpectedBuiltinTools } from './permissionPresets';
 import type { ClaudeStreamAssembler } from './streamAssembler';
 import { resolveSessionContinuation } from './sessionContinuation';
@@ -45,12 +46,16 @@ export async function runStatelessTurn(
 
 	const prompt = resolveUserTurnInput(input.chatInput, input.imageUrls ?? []);
 
+	const hookState = getHookRuntimeState(queryOptions);
+
 	let lastError: string | undefined;
 	let refusalMessage: string | undefined;
 	for await (const message of input.queryFn({
 		prompt,
 		options: sanitizeQueryOptionsForSdk(queryOptions),
 	})) {
+		// 先登记助手正文，供 Stop Hook 按「本轮」判定 proposal 标记是否已按增量交付输出
+		if (hookState) recordAssistantMessageForHooks(hookState, message);
 		await input.assembler.consume(message);
 		const record = message as Record<string, unknown>;
 		if (record.type === 'result' && record.subtype === 'error') {

@@ -23,6 +23,13 @@ export interface DeclarativePostToolUseConfig {
  * - 正文 `<proposal_created proposalId>` 是否 ⊆ 本轮写工具返回的 proposalId
  * - 正文是否缺 `<next>` 建议
  * - 若本轮建立了「作业规划」Task，是否全部 completed
+ *
+ * 判定口径：`<proposal_created>` 相关检查以「本轮全部助手正文」为依据（由 MessageDisplay
+ * Hook 累积，见 assistantBodyProposalIds），而非 Stop 事件的 last_assistant_message。
+ * 因为增量交付契约要求每创建一个提案就立刻输出对应标记（完成一个输出一个），标记天然
+ * 分散在中间各步骤；只看最后一条消息会把「已按契约输出」误判为「缺标记」，从而在收尾
+ * 消息上反复 block，迫使模型把本轮标记再汇总重发一次，产出重复的提案卡与 `<next>`。
+ * `<next>` 仍只看最后一条消息——快捷建议的语义就是出现在本轮回复末尾。
  */
 export interface DeclarativeStopHookConfig {
 	enabled?: boolean;
@@ -59,6 +66,14 @@ export interface HookRuntimeState {
 	proposalIdsFromWriteTools: Set<string>;
 	/** 本轮 Task 作业规划状态（taskId → status），供 Stop Hook 判定是否全部完成 */
 	taskStatusById: Map<string, string>;
+	/** 本轮任一助手正文是否出现过 `<proposal_created` 标记（含中间步骤） */
+	assistantBodySawProposalTag: boolean;
+	/** 本轮全部助手正文中出现过的 proposalId（含中间步骤），供子集校验 */
+	assistantBodyProposalIds: Set<string>;
+	/** 正在流式输出的助手消息 id，用于判断 MessageDisplay 增量属于哪条消息 */
+	streamingAssistantMessageId: string;
+	/** 正在流式输出的助手消息正文缓冲，仅保留当前一条，避免标记跨 flush 被截断而漏检 */
+	streamingAssistantMessageText: string;
 	/** Stop Hook 已连续 block 次数，达到 maxBlocks 后放行避免死循环 */
 	stopBlockCount: number;
 }
@@ -83,6 +98,10 @@ export function createHookRuntimeState(): HookRuntimeState {
 		postToolSuccessNames: new Set(),
 		proposalIdsFromWriteTools: new Set(),
 		taskStatusById: new Map(),
+		assistantBodySawProposalTag: false,
+		assistantBodyProposalIds: new Set(),
+		streamingAssistantMessageId: '',
+		streamingAssistantMessageText: '',
 		stopBlockCount: 0,
 	};
 }
@@ -95,7 +114,63 @@ export function resetHookRuntimeStateForNextTurn(state: HookRuntimeState): void 
 	state.postToolSuccessNames = new Set();
 	state.proposalIdsFromWriteTools = new Set();
 	state.taskStatusById = new Map();
+	state.assistantBodySawProposalTag = false;
+	state.assistantBodyProposalIds = new Set();
+	state.streamingAssistantMessageId = '';
+	state.streamingAssistantMessageText = '';
 	state.stopBlockCount = 0;
+}
+
+/** 从一段助手正文中提取 proposal 标记事实，累积进本轮口径 */
+export function recordAssistantBodyText(state: HookRuntimeState, text: string): void {
+	if (!text) return;
+	if (/<proposal_created/i.test(text)) state.assistantBodySawProposalTag = true;
+	for (const id of extractProposalIdsFromAssistantMessage(text)) {
+		state.assistantBodyProposalIds.add(id);
+	}
+}
+
+/**
+ * 累积「本轮助手正文」事实（MessageDisplay 增量路径）。
+ * 仅缓存当前一条消息的正文并每次全量重扫，既能命中跨 flush 边界的标记，也不会随长回复
+ * 无上限增长（长会话下 sidecar 复用同一 state）。
+ */
+export function recordAssistantBodyDelta(
+	state: HookRuntimeState,
+	messageId: string,
+	delta: string,
+	final: boolean,
+): void {
+	if (messageId !== state.streamingAssistantMessageId) {
+		state.streamingAssistantMessageId = messageId;
+		state.streamingAssistantMessageText = '';
+	}
+	if (delta) state.streamingAssistantMessageText += delta;
+
+	recordAssistantBodyText(state, state.streamingAssistantMessageText);
+
+	if (final) {
+		state.streamingAssistantMessageId = '';
+		state.streamingAssistantMessageText = '';
+	}
+}
+
+/**
+ * 累积「本轮助手正文」事实（SDK assistant 消息路径）。
+ * 与 MessageDisplay Hook 互为补充：MessageDisplay 保证在 Stop 事件前就已登记，本函数则
+ * 覆盖 SDK 在 headless / stream-json 等模式下不派发 MessageDisplay 的情况，确保「本轮是否
+ * 已按增量交付契约输出标记」这一事实无论运行模式都能被采集到。
+ */
+export function recordAssistantMessageForHooks(state: HookRuntimeState, message: unknown): void {
+	const record = message as { type?: unknown; message?: { content?: unknown } } | null;
+	if (!record || record.type !== 'assistant') return;
+	const content = record.message?.content;
+	if (!Array.isArray(content)) return;
+	for (const block of content) {
+		if (!block || typeof block !== 'object') continue;
+		const b = block as Record<string, unknown>;
+		if (b.type === 'text' && typeof b.text === 'string') recordAssistantBodyText(state, b.text);
+	}
 }
 
 export function buildDeclarativeHooks(
@@ -222,6 +297,26 @@ export function buildDeclarativeHooks(
 			: 3;
 		const proposalWriteTools = stopConfig.proposalWriteTools ?? [];
 
+		// MessageDisplay 在助手消息流式输出期间按行批次触发，是 SDK 侧唯一能覆盖「中间步骤
+		// 助手正文」的事件，用于把 proposal 标记事实累积成本轮口径（display-only，返回空对象
+		// 不改动实际输出）。
+		hooks.MessageDisplay = [
+			{
+				hooks: [
+					async (input: HookInput): Promise<HookJSONOutput> => {
+						const display = input as { message_id?: string; delta?: string; final?: boolean };
+						recordAssistantBodyDelta(
+							state,
+							typeof display.message_id === 'string' ? display.message_id : '',
+							typeof display.delta === 'string' ? display.delta : '',
+							display.final === true,
+						);
+						return {};
+					},
+				],
+			},
+		];
+
 		hooks.TaskCreated = [
 			{
 				hooks: [
@@ -262,11 +357,19 @@ export function buildDeclarativeHooks(
 							reasons.push('正文缺少 <next> 快捷建议，请在末尾补充 2-4 条');
 						}
 
+						// 以下两项按「本轮全部助手正文」判定：中间步骤已按增量交付契约输出的标记同样算数
+						const sawProposalTagThisTurn = state.assistantBodySawProposalTag
+							|| /<proposal_created/i.test(lastMessage);
+						const proposalIdsThisTurn = new Set([
+							...state.assistantBodyProposalIds,
+							...extractProposalIdsFromAssistantMessage(lastMessage),
+						]);
+
 						if (stopConfig.requireProposalCreatedOnToolSuccess && proposalWriteTools.length > 0) {
 							const hasProposalWriteSuccess = [...state.postToolSuccessNames].some((name) =>
 								proposalWriteTools.some((pattern) => matchesToolPattern(name, pattern)),
 							);
-							if (hasProposalWriteSuccess && !/<proposal_created/i.test(lastMessage)) {
+							if (hasProposalWriteSuccess && !sawProposalTagThisTurn) {
 								reasons.push('本轮已成功执行创改删工具，但正文缺少 <proposal_created> 标记');
 							}
 						}
@@ -276,8 +379,9 @@ export function buildDeclarativeHooks(
 							&& proposalWriteTools.length > 0
 							&& state.proposalIdsFromWriteTools.size > 0
 						) {
-							const bodyIds = extractProposalIdsFromAssistantMessage(lastMessage);
-							const unknown = bodyIds.filter((id) => !state.proposalIdsFromWriteTools.has(id));
+							const unknown = [...proposalIdsThisTurn].filter(
+								(id) => !state.proposalIdsFromWriteTools.has(id),
+							);
 							if (unknown.length > 0) {
 								reasons.push(
 									`正文 <proposal_created> 含未在本轮写工具结果中出现的 proposalId（${unknown.join(', ')}），`
