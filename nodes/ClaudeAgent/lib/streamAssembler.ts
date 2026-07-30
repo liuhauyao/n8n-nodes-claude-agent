@@ -1,4 +1,12 @@
 import {
+	resolveToolGroup,
+	resolveToolVisibility,
+	sanitizeToolErrorForDisplay,
+	summarizeToolCall,
+	type AgentToolGroup,
+	type AgentToolVisibility,
+} from './agentToolPolicy';
+import {
 	encodeClaudeStreamPayload,
 	embedClaudeMessageMeta,
 	extractNextSuggestions,
@@ -7,9 +15,11 @@ import {
 	stripClaudeMessageMeta,
 	stripNextTags,
 	type AgentTaskItem,
+	type AgentToolCallMeta,
 	type ClaudeMessageMeta,
 	type ClaudeStreamPayload,
 } from './claudeStreamProtocol';
+import { findUnexpectedBuiltinTools } from './permissionPresets';
 import {
 	bareToolName,
 	extractTaskIdFromToolResultBlock,
@@ -25,6 +35,23 @@ export interface StreamSink {
 	onEnd: () => void | Promise<void>;
 }
 
+export interface ClaudeStreamAssemblerOptions {
+	/** preset 内置工具 allow-list；null 表示全量 preset，跳过审计 */
+	expectedBuiltinTools?: string[] | null;
+}
+
+interface PendingToolState {
+	id: string;
+	name: string;
+	label: string;
+	group: AgentToolGroup;
+	visibility: AgentToolVisibility;
+	startedAt: number;
+	input?: Record<string, unknown>;
+	emittedStart: boolean;
+	done: boolean;
+}
+
 export class ClaudeStreamAssembler {
 	private markdown = '';
 	private readonly markdownSegments: string[] = [];
@@ -32,8 +59,12 @@ export class ClaudeStreamAssembler {
 	private thinkingStarted = false;
 	private thinkingDurationMs?: number;
 	private completedAssistantMessages = 0;
+	private stepIndex = 0;
 	private readonly startedTools = new Set<string>();
-	private readonly toolCalls: ClaudeMessageMeta['toolCalls'] = [];
+	private readonly toolCalls: AgentToolCallMeta[] = [];
+	private readonly pendingTools = new Map<string, PendingToolState>();
+	/** stream_event content_block index → callId */
+	private readonly blockIndexToCallId = new Map<number, string>();
 	private sessionId?: string;
 	private usage?: ClaudeMessageMeta['usage'];
 	private fallbackMarkdown = '';
@@ -41,6 +72,7 @@ export class ClaudeStreamAssembler {
 	private sdkSuggestions: string[] = [];
 	private refusalMessage?: string;
 	private readonly stepUsageByMessageId = new Map<string, { input: number; output: number }>();
+	private toolsAuditDone = false;
 
 	/**
 	 * 用户作业规划（Task 工具）状态。与「强制开工顺序」无关，仅复杂多步业务
@@ -59,7 +91,14 @@ export class ClaudeStreamAssembler {
 	/** TaskCreate 的 tool_use_id → SDK 真实 taskId（解析失败时用于 TaskUpdate 对齐） */
 	private readonly toolUseIdToRealId = new Map<string, string>();
 
-	constructor(private readonly sink: StreamSink) {}
+	constructor(
+		private readonly sink: StreamSink,
+		private readonly options: ClaudeStreamAssemblerOptions = {},
+	) {}
+
+	setExpectedBuiltinTools(tools: string[] | null | undefined): void {
+		this.options.expectedBuiltinTools = tools;
+	}
 
 	async begin(): Promise<void> {
 		await this.sink.onBegin();
@@ -85,12 +124,15 @@ export class ClaudeStreamAssembler {
 		const markdown = this.resolveFinalMarkdown();
 		const suggestions = extractNextSuggestions(markdown);
 		const agentTasks = this.getAgentTasks();
+		const steps = this.buildStepsMeta();
 		const meta: ClaudeMessageMeta = {
+			version: steps.length ? 2 : 1,
 			timeline: [
 				...(this.thinking ? [{ type: 'thinking', content: this.thinking }] : []),
 				...this.buildMarkdownTimeline(),
 			] as ClaudeMessageMeta['timeline'],
 			toolCalls: this.toolCalls,
+			steps: steps.length ? steps : undefined,
 			thinking: this.thinking || undefined,
 			thinkingDurationMs: this.thinkingDurationMs,
 			usage: this.usage,
@@ -104,6 +146,30 @@ export class ClaudeStreamAssembler {
 	/** 当前用户作业规划快照（过滤 deleted），空数组表示本回合无复杂任务 */
 	getAgentTasks(): AgentTaskItem[] {
 		return this.agentTasks.filter((task) => task.status !== 'deleted');
+	}
+
+	private buildStepsMeta(): NonNullable<ClaudeMessageMeta['steps']> {
+		const texts = this.buildMarkdownTimeline().map((b) => b.content);
+		const visibleTools = this.toolCalls.filter((t) => t.visibility !== 'hidden');
+		if (!texts.length && !visibleTools.length) return [];
+
+		// 简化落库：单步或按正文段落切分；工具全部挂到最后一步（流式时前端已有 step 边界）
+		if (texts.length <= 1) {
+			return [{
+				index: 0,
+				text: texts[0],
+				toolCalls: visibleTools.length ? visibleTools : undefined,
+			}];
+		}
+
+		const steps: NonNullable<ClaudeMessageMeta['steps']> = texts.map((text, index) => ({
+			index,
+			text,
+		}));
+		if (visibleTools.length) {
+			steps[steps.length - 1]!.toolCalls = visibleTools;
+		}
+		return steps;
 	}
 
 	private buildMarkdownTimeline(): Array<{ type: 'markdown'; content: string }> {
@@ -180,13 +246,66 @@ export class ClaudeStreamAssembler {
 			return;
 		}
 
+		if (type === 'tool_progress') {
+			await this.consumeToolProgress(record);
+			return;
+		}
+
 		if (type === 'result') {
 			await this.consumeResultMessage(record);
 		}
 	}
 
+	private async consumeToolProgress(record: Record<string, unknown>): Promise<void> {
+		const callId = typeof record.tool_use_id === 'string' ? record.tool_use_id : '';
+		const elapsed = typeof record.elapsed_time_seconds === 'number'
+			? record.elapsed_time_seconds
+			: undefined;
+		if (!callId || elapsed === undefined) return;
+		const pending = this.pendingTools.get(callId);
+		if (!pending || pending.visibility === 'hidden') return;
+		await this.emit({ kind: 'tool_progress', callId, elapsedSec: elapsed });
+	}
+
 	private async consumeSystemMessage(record: Record<string, unknown>): Promise<void> {
 		const subtype = String(record.subtype ?? '');
+
+		if (subtype === 'init' && !this.toolsAuditDone) {
+			this.toolsAuditDone = true;
+			const actualTools = Array.isArray(record.tools)
+				? record.tools.filter((t): t is string => typeof t === 'string')
+				: undefined;
+			const unexpected = findUnexpectedBuiltinTools(
+				actualTools,
+				this.options.expectedBuiltinTools ?? null,
+			);
+			if (unexpected.length) {
+				const message = `unexpected builtin tools: ${unexpected.join(', ')}`;
+				// 运维可见：意外内置工具出现在 init，便于测试环境对照 preset allow-list
+				// eslint-disable-next-line no-console
+				console.warn(`[ClaudeAgent] tools_audit ${message}`);
+				await this.emit({ kind: 'status', phase: 'tools_audit', message });
+			}
+			return;
+		}
+
+		if (subtype === 'permission_denied') {
+			const toolUseId = typeof record.tool_use_id === 'string' ? record.tool_use_id : '';
+			const toolName = typeof record.tool_name === 'string' ? record.tool_name : 'tool';
+			const denyMessage = typeof record.message === 'string'
+				? record.message
+				: '权限拒绝';
+			if (toolUseId) {
+				await this.ensureToolStarted(toolUseId, toolName);
+				await this.finishTool(toolUseId, {
+					ok: false,
+					denied: true,
+					error: denyMessage,
+				});
+			}
+			return;
+		}
+
 		if (subtype === 'model_fallback') {
 			const trigger = typeof record.message === 'string'
 				? record.message
@@ -233,6 +352,8 @@ export class ClaudeStreamAssembler {
 		if (eventType === 'message_start') {
 			if (this.completedAssistantMessages > 0) {
 				this.beginNewAssistantMarkdownRound();
+				this.stepIndex += 1;
+				await this.emit({ kind: 'step_start', index: this.stepIndex });
 			}
 			const message = evt.message as Record<string, unknown> | undefined;
 			this.recordStepUsageFromAnthropicMessage(message);
@@ -254,39 +375,126 @@ export class ClaudeStreamAssembler {
 				this.thinking += delta.thinking;
 				await this.emit({ kind: 'thinking_chunk', text: delta.thinking });
 			}
+			return;
 		}
 
 		if (eventType === 'content_block_start') {
 			const block = evt.content_block as Record<string, unknown> | undefined;
+			const index = typeof evt.index === 'number' ? evt.index : undefined;
 			if (block?.type === 'tool_use') {
 				const callId = String(block.id ?? '');
 				const name = String(block.name ?? 'tool');
-				if (callId && !this.startedTools.has(callId)) {
-					this.startedTools.add(callId);
-					if (shouldShowToolInUi(name)) {
-						this.toolCalls.push({ id: callId, name, label: resolveToolLabel(name), done: false });
-						await this.emit({
-							kind: 'tool_start',
-							callId,
-							name,
-							label: resolveToolLabel(name),
-						});
-					}
+				if (callId && index !== undefined) {
+					this.blockIndexToCallId.set(index, callId);
+				}
+				if (callId) {
+					await this.ensureToolStarted(callId, name);
 				}
 			}
+			return;
 		}
 
+		// content_block_stop 仅表示入参流完，不代表工具执行完成——不再发 tool_end
 		if (eventType === 'content_block_stop') {
-			const pending = this.toolCalls.find((t) => !t.done);
-			if (pending) {
-				pending.done = true;
-				await this.emit({ kind: 'tool_end', callId: pending.id, ok: true });
-			}
+			return;
 		}
 
 		if (eventType === 'message_stop' && this.thinkingStarted) {
 			this.thinkingStarted = false;
 			await this.emit({ kind: 'thinking_end', durationMs: this.thinkingDurationMs });
+		}
+	}
+
+	private async ensureToolStarted(
+		callId: string,
+		name: string,
+		input?: Record<string, unknown>,
+	): Promise<PendingToolState> {
+		let pending = this.pendingTools.get(callId);
+		if (!pending) {
+			const group = resolveToolGroup(name);
+			const visibility = resolveToolVisibility(name);
+			pending = {
+				id: callId,
+				name,
+				label: resolveToolLabel(name),
+				group,
+				visibility,
+				startedAt: Date.now(),
+				input,
+				emittedStart: false,
+				done: false,
+			};
+			this.pendingTools.set(callId, pending);
+		} else if (input) {
+			pending.input = input;
+		}
+
+		if (!pending.emittedStart && !this.startedTools.has(callId)) {
+			this.startedTools.add(callId);
+			pending.emittedStart = true;
+			const summary = summarizeToolCall(name, pending.input);
+			// Task 规划工具等仍入 meta 但不发流式事件（走 task_snapshot）
+			const emitStart = shouldShowToolInUi(name) && pending.visibility === 'show';
+			this.toolCalls.push({
+				id: callId,
+				name,
+				label: pending.label,
+				done: false,
+				group: pending.group,
+				visibility: pending.visibility,
+				summary,
+			});
+			if (emitStart) {
+				await this.emit({
+					kind: 'tool_start',
+					callId,
+					name,
+					label: pending.label,
+					group: pending.group,
+					visibility: pending.visibility,
+					summary,
+				});
+			}
+		}
+		return pending;
+	}
+
+	private async finishTool(
+		callId: string,
+		result: { ok: boolean; error?: string; denied?: boolean; summary?: string },
+	): Promise<void> {
+		const pending = this.pendingTools.get(callId);
+		if (!pending || pending.done) return;
+		pending.done = true;
+
+		const durationMs = Date.now() - pending.startedAt;
+		const summary = result.summary
+			?? summarizeToolCall(pending.name, pending.input);
+		const displayError = (result.error || result.denied)
+			? sanitizeToolErrorForDisplay(result.error, { denied: !!result.denied })
+			: undefined;
+
+		const record = this.toolCalls.find((t) => t.id === callId);
+		if (record) {
+			record.done = true;
+			record.ok = result.ok;
+			record.error = displayError;
+			record.denied = result.denied;
+			record.durationMs = durationMs;
+			if (summary) record.summary = summary;
+		}
+
+		if (pending.visibility === 'show') {
+			await this.emit({
+				kind: 'tool_end',
+				callId,
+				ok: result.ok,
+				error: displayError,
+				denied: result.denied,
+				durationMs,
+				summary,
+			});
 		}
 	}
 
@@ -307,14 +515,11 @@ export class ClaudeStreamAssembler {
 			if (b.type === 'tool_use') {
 				const callId = String(b.id ?? '');
 				const name = String(b.name ?? 'tool');
-				if (callId && !this.startedTools.has(callId) && shouldShowToolInUi(name)) {
-					this.startedTools.add(callId);
-					this.toolCalls.push({ id: callId, name, label: resolveToolLabel(name), done: true });
-					await this.emit({ kind: 'tool_start', callId, name, label: resolveToolLabel(name) });
-					await this.emit({ kind: 'tool_end', callId, ok: true });
+				const input = (b.input as Record<string, unknown>) ?? {};
+				if (callId) {
+					await this.ensureToolStarted(callId, name, input);
 				}
 				if (callId && isTaskPlanningToolName(name)) {
-					const input = (b.input as Record<string, unknown>) ?? {};
 					if (this.handleTaskToolUse(callId, name, input)) taskChanged = true;
 				}
 			}
@@ -324,10 +529,7 @@ export class ClaudeStreamAssembler {
 
 	/**
 	 * 用户作业规划工具（Task）来自完整 assistant message 的 tool_use 块（含已解析
-	 * 完整 input），而非 stream_event 的增量 delta（tool_use 的 input 在流式阶段是
-	 * TaskCreate 的 subject/description 在 assistant tool_use 完整 input 中即可解析，
-	 * 解析后立即登记并推送 task_snapshot（不必等 tool_result）。tool_result 到达时
-	 * 若含 SDK 真实 taskId 则迁移 id；TaskUpdate 的 input 已带 taskId，可直接应用。
+	 * 完整 input），而非 stream_event 的增量 delta。
 	 * 返回 true 表示 agentTasks 快照发生了可见变化（需要上层 emit）。
 	 */
 	private handleTaskToolUse(callId: string, name: string, input: Record<string, unknown>): boolean {
@@ -461,22 +663,55 @@ export class ClaudeStreamAssembler {
 		const message = record.message as Record<string, unknown> | undefined;
 		const content = message?.content;
 		if (!Array.isArray(content)) return;
-		// SDK 官方结构化结果（TaskCreateOutput/TaskUpdateOutput 真源）挂在消息记录的
-		// tool_use_result 字段，与 message.content 同级；message.content[].content
-		// 只是喂给模型看的人类可读文本，不同上游模型/网关（如第三方模型经 OpenAI 兼容
-		// shim 转发）格式不一致（例如纯文本 "Task #1 created successfully: ..."），
-		// 曾误把 taskId 解析兜底成 tool_use_id，导致 TaskUpdate 永远匹配不到已创建的
-		// 任务、前端 Queue 卡在 pending 不勾选——这是本类 bug 的真实根因。
+		// SDK 官方结构化结果挂在消息记录的 tool_use_result 字段，与 message.content 同级
 		const toolUseResult = record.tool_use_result ?? (record as Record<string, unknown>).toolUseResult;
 		let changed = false;
 		for (const block of content) {
 			if (!block || typeof block !== 'object') continue;
 			const b = block as Record<string, unknown>;
 			if (b.type !== 'tool_result') continue;
+
+			const toolUseId = typeof b.tool_use_id === 'string' ? b.tool_use_id : undefined;
+			if (toolUseId) {
+				const isError = b.is_error === true;
+				let errorText: string | undefined;
+				if (isError) {
+					errorText = this.extractToolResultErrorText(b);
+				}
+				const summary = summarizeToolCall(
+					this.pendingTools.get(toolUseId)?.name ?? 'tool',
+					this.pendingTools.get(toolUseId)?.input,
+					toolUseResult,
+				);
+				await this.finishTool(toolUseId, {
+					ok: !isError,
+					error: errorText,
+					summary,
+				});
+			}
+
 			if (this.handleTaskToolResult(b, toolUseResult)) changed = true;
 			if (this.handleTaskUpdateToolResult(b, toolUseResult)) changed = true;
 		}
 		if (changed) await this.emitTaskSnapshot();
+	}
+
+	private extractToolResultErrorText(block: Record<string, unknown>): string | undefined {
+		const content = block.content;
+		if (typeof content === 'string' && content.trim()) {
+			return content.trim().slice(0, 200);
+		}
+		if (Array.isArray(content)) {
+			for (const part of content) {
+				if (part && typeof part === 'object') {
+					const text = (part as Record<string, unknown>).text;
+					if (typeof text === 'string' && text.trim()) {
+						return text.trim().slice(0, 200);
+					}
+				}
+			}
+		}
+		return '工具执行失败';
 	}
 
 	/** TaskUpdate 的 tool_result：从 statusChange 确认状态（assistant tool_use 已先行解析时作兜底） */
@@ -591,12 +826,20 @@ export class ClaudeStreamAssembler {
 				costUsd: resolvedUsage.costUsd,
 			});
 		}
+
+		// 收尾：尚未收到 tool_result 的工具标记为完成（可能被中断）
+		for (const [callId, pending] of this.pendingTools) {
+			if (!pending.done) {
+				await this.finishTool(callId, { ok: true });
+			}
+		}
+
 		if (record.subtype === 'success') {
 			await this.emit({ kind: 'status', phase: 'success', message: 'completed' });
 			if (this.getAgentTasks().length > 0) {
 				await this.emitTaskSnapshot();
 			}
-		} else if (record.subtype === 'error') {
+		} else if (record.subtype === 'error' || String(record.subtype ?? '').startsWith('error_')) {
 			await this.emit({ kind: 'status', phase: 'error', message: String(record.result ?? 'error') });
 		}
 	}

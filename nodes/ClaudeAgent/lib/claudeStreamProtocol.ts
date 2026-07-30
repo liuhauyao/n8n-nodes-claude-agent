@@ -1,6 +1,8 @@
 /** n8n item.content JSON envelope for Claude-native stream events. */
 export const CLAUDE_STREAM_MARKER = '__claude__';
 
+import type { AgentToolGroup, AgentToolVisibility } from './agentToolPolicy';
+
 /**
  * 用户作业规划项（SDK TaskCreate/TaskUpdate 映射）。
  * 与灵感助手「强制开工顺序」无关——仅复杂多步业务诉求时 Agent 才会创建，
@@ -14,9 +16,35 @@ export interface AgentTaskItem {
 	activeForm?: string;
 }
 
+export interface AgentToolCallMeta {
+	id: string;
+	name: string;
+	label: string;
+	done: boolean;
+	ok?: boolean;
+	error?: string;
+	denied?: boolean;
+	group?: AgentToolGroup;
+	visibility?: AgentToolVisibility;
+	summary?: string;
+	durationMs?: number;
+	entityName?: string;
+}
+
+/** 交错步骤：一段正文 + 该段触发的工具组 */
+export interface AgentStepMeta {
+	index: number;
+	text?: string;
+	toolCalls?: AgentToolCallMeta[];
+}
+
 export type ClaudeStreamPayload =
-	| { kind: 'tool_start'; callId: string; name: string; label: string }
-	| { kind: 'tool_end'; callId: string; ok?: boolean; error?: string }
+	| { kind: 'tool_start'; callId: string; name: string; label: string;
+		group: AgentToolGroup; visibility: AgentToolVisibility; summary?: string }
+	| { kind: 'tool_end'; callId: string; ok: boolean; error?: string;
+		denied?: boolean; durationMs?: number; summary?: string }
+	| { kind: 'tool_progress'; callId: string; elapsedSec: number }
+	| { kind: 'step_start'; index: number }
 	| { kind: 'thinking_start' }
 	| { kind: 'thinking_chunk'; text: string }
 	| { kind: 'thinking_end'; durationMs?: number }
@@ -58,8 +86,12 @@ export function resolveToolLabel(name: string): string {
 }
 
 export interface ClaudeMessageMeta {
+	/** meta 版本：2 = 含 steps；缺省/1 = 仅扁平 toolCalls */
+	version?: 1 | 2;
 	timeline: Array<{ type: string; content?: string; tool?: unknown }>;
-	toolCalls: Array<{ id: string; name: string; label: string; done: boolean }>;
+	toolCalls: AgentToolCallMeta[];
+	/** v2：交错步骤时间线 */
+	steps?: AgentStepMeta[];
 	thinking?: string;
 	thinkingDurationMs?: number;
 	usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
@@ -112,6 +144,7 @@ export function extractNextSuggestions(text: string): string[] {
 export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta): string {
 	const clean = stripClaudeMessageMeta(markdown);
 	const hasTools = !!meta.toolCalls?.length;
+	const hasSteps = !!meta.steps?.length;
 	const hasTimeline = !!meta.timeline?.length;
 	const hasThinking = !!meta.thinking?.trim();
 	const hasDuration = meta.thinkingDurationMs !== undefined;
@@ -121,6 +154,7 @@ export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta
 	const hasAgentTasks = !!meta.agentTasks?.length;
 	if (
 		!hasTools
+		&& !hasSteps
 		&& !hasTimeline
 		&& !hasThinking
 		&& !hasDuration
@@ -133,9 +167,11 @@ export function embedClaudeMessageMeta(markdown: string, meta: ClaudeMessageMeta
 	}
 
 	const payload: ClaudeMessageMeta = {
+		version: hasSteps ? 2 : 1,
 		timeline: meta.timeline,
 		toolCalls: meta.toolCalls,
 	};
+	if (hasSteps) payload.steps = meta.steps;
 	if (hasThinking) payload.thinking = meta.thinking;
 	if (hasDuration) payload.thinkingDurationMs = meta.thinkingDurationMs;
 	if (hasUsage) payload.usage = meta.usage;

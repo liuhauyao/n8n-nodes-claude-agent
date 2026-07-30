@@ -177,8 +177,8 @@ npm run poc:sidecar           # Phase B client (terminal 2)
 
 | Preset | Description |
 |--------|-------------|
-| **`mcp_skills_only`** | Built-in tools denied via `disallowedTools` + `dontAsk`. MCP tools auto-approved with `allowedTools: mcp__{server}__*` when using Deny/No Filter mode. Requires `strictMcpConfig`. Use for workflows that rely on MCP and skills only, with no local code access. |
-| **`plan_only`** | All built-in tools denied (`dontAsk`); streaming UI still shows rejected calls. No MCP on the workflow side. Use for pure text-planning agents. |
+| **`mcp_skills_only`** | Built-in tools limited via SDK `tools` **allow-list** (`Skill`, `TaskCreate`, `TaskUpdate`, `ListMcpResourcesTool`, `ReadMcpResourceTool`) plus defense-in-depth `disallowedTools`; `dontAsk`. MCP auto-approved with `allowedTools: mcp__{server}__*` in Deny/No Filter mode. Requires `strictMcpConfig`. |
+| **`plan_only`** | Same built-in allow-list as `mcp_skills_only` (`dontAsk`). No MCP on the workflow side. Use for pure text-planning agents. |
 | `customer_service` | **Read/Grep/Glob + Skills** — registers `claude_code` toolset, blocks Write/Bash/Web. Use for Q&A agents that need to analyze a local codebase alongside skills. |
 | `read_only` | Alias for `customer_service`. |
 | `full_agent` | Full Claude Code tools (`world_assistant` legacy alias → `full_agent`). Use only in trusted, sandboxed environments. |
@@ -187,8 +187,8 @@ npm run poc:sidecar           # Phase B client (terminal 2)
 
 | Preset | Built-in tools | MCP | Skills | Streaming tool events |
 |--------|----------------|-----|--------|-----------------------|
-| `mcp_skills_only` | Denied | Yes | Yes | Yes (MCP + denied built-ins) |
-| `plan_only` | Denied | No (workflow side) | Yes | Yes (denied calls only) |
+| `mcp_skills_only` | Allow-list only (Skill/Task*/MCP resources) | Yes | Yes | Yes (visible MCP; hidden Skill/memory) |
+| `plan_only` | Allow-list only | No (workflow side) | Yes | Yes |
 | `customer_service` | Read/Grep/Glob | Optional | Yes | Yes |
 | `read_only` | Read/Grep/Glob | Optional | Yes | Yes |
 | `full_agent` | All | Yes | Yes | Yes |

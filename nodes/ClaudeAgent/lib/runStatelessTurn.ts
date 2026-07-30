@@ -1,6 +1,7 @@
 import type { ClaudeModelConfig, StoredSessionRecord } from '../../shared/lib/types';
 import { modelConfigSummary } from '../../shared/lib/resolveModelConfig';
 import { buildQueryOptions, type BuildQueryOptionsInput } from './buildQueryOptions';
+import { getExpectedBuiltinTools } from './permissionPresets';
 import type { ClaudeStreamAssembler } from './streamAssembler';
 import { resolveSessionContinuation } from './sessionContinuation';
 import { linkAbortSignal, sanitizeQueryOptionsForSdk } from './queryOptionsSanitize';
@@ -36,6 +37,7 @@ export async function runStatelessTurn(
 		...input,
 		continuation,
 	});
+	input.assembler.setExpectedBuiltinTools(getExpectedBuiltinTools(input.permissionPreset));
 	const abortController = linkAbortSignal(input.abortSignal);
 	if (abortController) {
 		queryOptions.abortController = abortController;

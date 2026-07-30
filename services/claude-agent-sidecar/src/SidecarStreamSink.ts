@@ -8,14 +8,20 @@ export class SidecarStreamSink {
 	private readonly assembler: ClaudeStreamAssembler;
 	private ended = false;
 
-	constructor(private readonly res: ServerResponse) {
-		this.assembler = new ClaudeStreamAssembler({
-			onBegin: async () => undefined,
-			onStructured: async (jsonContent) => {
-				this.writeRaw(jsonContent);
+	constructor(
+		private readonly res: ServerResponse,
+		expectedBuiltinTools?: string[] | null,
+	) {
+		this.assembler = new ClaudeStreamAssembler(
+			{
+				onBegin: async () => undefined,
+				onStructured: async (jsonContent) => {
+					this.writeRaw(jsonContent);
+				},
+				onEnd: async () => undefined,
 			},
-			onEnd: async () => undefined,
-		});
+			{ expectedBuiltinTools },
+		);
 	}
 
 	async begin(): Promise<void> {

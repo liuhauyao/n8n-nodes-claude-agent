@@ -14,9 +14,34 @@ export type PermissionPresetConfig = {
 	disallowedTools?: string[];
 	permissionMode?: string;
 	allowDangerouslySkipPermissions?: boolean;
+	/** SDK Options.tools：string[] 为内置工具 allow-list；preset 加载全部 Claude Code 工具 */
 	tools?: { type: 'preset'; preset: 'claude_code' } | readonly string[];
 	defaultStrictMcpConfig?: boolean;
 };
+
+/** 灵感助手 / plan_only：显式内置工具 allow-list（未列出的一律不加载） */
+const MCP_SKILLS_BUILTIN_TOOLS = [
+	'Skill',
+	'TaskCreate',
+	'TaskUpdate',
+	'ListMcpResourcesTool',
+	'ReadMcpResourceTool',
+] as const;
+
+/**
+ * 纵深防御 deny：allow-list 已兜住；此处覆盖别名与高危名，
+ * 防止 SDK 升级把新默认工具塞进 session。
+ */
+const MCP_SKILLS_DEFENSE_DENY = [
+	'Bash', 'bash', 'InvokeBash', 'run', 'PowerShell', 'REPL',
+	'Agent', 'Task', 'SendMessage', 'SendUserFile', 'PushNotification',
+	'Workflow', 'Monitor', 'EnterWorktree', 'ExitWorktree',
+	'TaskStop', 'TaskGet', 'TaskList', 'TaskOutput',
+	'Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep',
+	'WebFetch', 'WebSearch', 'Artifact', 'ClaudeDesign', 'Projects',
+	'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger',
+	'EnterPlanMode', 'ExitPlanMode', 'EndConversation',
+] as const;
 
 const CODEBASE_READ_TOOLS = {
 	tools: { type: 'preset', preset: 'claude_code' } as const,
@@ -36,26 +61,19 @@ export const PERMISSION_PRESETS: Record<string, PermissionPresetConfig> = {
 		...CODEBASE_READ_TOOLS,
 	},
 	mcp_skills_only: {
-		tools: { type: 'preset', preset: 'claude_code' },
+		tools: [...MCP_SKILLS_BUILTIN_TOOLS],
 		allowedTools: ['Skill', 'TaskCreate', 'TaskUpdate'],
-		disallowedTools: [
-			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
-			'WebFetch', 'WebSearch', 'NotebookEdit',
-			'TaskGet', 'TaskList',
-		],
+		disallowedTools: [...MCP_SKILLS_DEFENSE_DENY],
 		permissionMode: 'dontAsk',
 		defaultStrictMcpConfig: true,
 	},
 	plan_only: {
-		tools: { type: 'preset', preset: 'claude_code' },
+		tools: [...MCP_SKILLS_BUILTIN_TOOLS],
 		allowedTools: ['Skill', 'TaskCreate', 'TaskUpdate'],
-		disallowedTools: [
-			'Bash', 'Write', 'Edit', 'Read', 'Grep', 'Glob',
-			'WebFetch', 'WebSearch', 'NotebookEdit',
-			'TaskGet', 'TaskList',
-		],
+		disallowedTools: [...MCP_SKILLS_DEFENSE_DENY],
 		permissionMode: 'dontAsk',
 	},
+	/** 内部调试：全量 Claude Code 工具；灵感助手生产路径勿用 */
 	full_agent: {
 		tools: { type: 'preset', preset: 'claude_code' },
 		permissionMode: 'bypassPermissions',
@@ -80,4 +98,31 @@ export function resolveQueryPermissionMode(
 ): { permissionMode?: string } {
 	if (!presetMode) return {};
 	return { permissionMode: presetMode };
+}
+
+/** 取 preset 的内置工具 allow-list（string[]）；preset 模式返回 null 表示「全量」 */
+export function getExpectedBuiltinTools(presetKey: string): string[] | null {
+	const key = resolvePermissionPreset(presetKey);
+	const tools = PERMISSION_PRESETS[key].tools;
+	if (Array.isArray(tools)) return [...tools];
+	return null;
+}
+
+/**
+ * 对比 SDK init 消息中的实际 tools 与 allow-list。
+ * 返回超出 allow-list 的内置工具名（MCP 工具 mcp__* 忽略）。
+ */
+export function findUnexpectedBuiltinTools(
+	actualTools: string[] | undefined,
+	expectedBuiltin: string[] | null,
+): string[] {
+	if (!actualTools?.length || expectedBuiltin === null) return [];
+	const expected = new Set(expectedBuiltin);
+	// Task 是 Agent 的历史别名，init 可能仍列作 Task
+	if (expected.has('Agent')) expected.add('Task');
+	if (expected.has('Task')) expected.add('Agent');
+	return actualTools.filter((name) => {
+		if (!name || name.startsWith('mcp__')) return false;
+		return !expected.has(name);
+	});
 }

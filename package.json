@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-claude-sdk-agent",
-  "version": "1.9.4",
+  "version": "1.9.6",
   "description": "n8n community nodes — Claude Agent SDK with Model Selector, Provider credentials, streaming, MCP and skills.",
   "keywords": [
     "n8n-community-node-package",
@@ -40,6 +40,7 @@
     "test:user-images": "npm run build && node --test tests/userMessageImages.test.mjs",
     "test:shim-convert": "node --test tests/anthropicOpenAiConvert.test.mjs tests/openAiReasoningConvert.test.mjs",
     "test:utf8-guard": "npm run build && node --test tests/utf8ReplacementGuard.test.mjs",
+    "test:stream-assembler": "npm run build && node --test tests/streamAssembler.tasks.test.mjs tests/streamAssembler.lifecycle.test.mjs",
     "build:sidecar": "npm run build && cd services/claude-agent-sidecar && npm run build",
     "sidecar": "node services/claude-agent-sidecar/dist/index.js",
     "shim": "node scripts/anthropic-openai-shim.mjs"

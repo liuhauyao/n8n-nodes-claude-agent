@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { URL } from 'node:url';
 
+import { getExpectedBuiltinTools } from '../../../dist/nodes/ClaudeAgent/lib/permissionPresets';
 import type { SidecarMessageRequest } from '../../../dist/nodes/ClaudeAgent/lib/sidecarClient';
 import { hasUserTurnContent, normalizeImageUrls } from '../../../dist/nodes/ClaudeAgent/lib/userMessageImages';
 import type { ClaudeModelConfig } from '../../../dist/nodes/shared/lib/types';
@@ -107,7 +108,10 @@ async function main(): Promise<void> {
 					return;
 				}
 				const sessionTtlSeconds = Number(parsed.params.sessionTtlSeconds ?? 604_800);
-				const sink = new SidecarStreamSink(res);
+				const expectedBuiltinTools = getExpectedBuiltinTools(
+					String(parsed.params.permissionPreset ?? ''),
+				);
+				const sink = new SidecarStreamSink(res, expectedBuiltinTools);
 				await manager.handleMessage(businessSessionId, parsed, sink, sessionTtlSeconds);
 				return;
 			}
